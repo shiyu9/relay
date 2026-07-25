@@ -86,6 +86,21 @@ def in_scope(cwd):
         return False
 
 
+def build_recorder_env(base_env):
+    """Env for the detached recorder. Pure: base_env is not mutated.
+
+    ANTHROPIC_API_KEY overrides subscription auth even when logged in, and in
+    headless (-p) mode it is used without any prompt — a stale key silently
+    401s the recorder. Clearing it is the only documented way to fall back to
+    subscription auth, so it is the default; RELAY_KEEP_API_KEY=1 opts out.
+    """
+    env = dict(base_env)
+    env["RELAY_HOOK_ACTIVE"] = "1"
+    if env.get("RELAY_KEEP_API_KEY") != "1":
+        env.pop("ANTHROPIC_API_KEY", None)
+    return env
+
+
 def derive_transcript_path(cwd, session_id):
     """Fallback: ~/.claude/projects/<sanitized-cwd>/<session_id>.jsonl"""
     if not session_id:

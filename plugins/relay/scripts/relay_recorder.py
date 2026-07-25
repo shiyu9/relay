@@ -135,7 +135,9 @@ def main():
         out + ("\n--- stderr ---\n" + p.stderr if p.stderr else ""), encoding="utf-8")
 
     if p.returncode != 0:
-        log("rec", f"abort: claude exited {p.returncode}")
+        log("rec", f"abort: claude exited {p.returncode}"
+                   " (auth? check `claude auth status`;"
+                   " API-key-only setups need RELAY_KEEP_API_KEY=1)")
         return
     if "NOTHING_TO_RECORD" in out and "===DIARY===" not in out:
         log("rec", "skip: nothing to record")

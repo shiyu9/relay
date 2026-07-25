@@ -13,6 +13,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from relay_common import (
+    build_recorder_env,
     derive_transcript_path,
     force_utf8,
     in_scope,
@@ -91,12 +92,7 @@ def main():
         return
 
     recorder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "relay_recorder.py")
-    env = dict(os.environ)
-    env["RELAY_HOOK_ACTIVE"] = "1"
-    # Opt-in: force the recorder onto claude.ai subscription auth even when a
-    # (possibly stale) API key is present in the environment.
-    if env.get("RELAY_CLEAR_API_KEY") == "1":
-        env.pop("ANTHROPIC_API_KEY", None)
+    env = build_recorder_env(os.environ)
 
     kwargs = {"cwd": cwd, "env": env, "stdout": subprocess.DEVNULL,
               "stderr": subprocess.DEVNULL, "stdin": subprocess.DEVNULL}

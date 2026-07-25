@@ -27,7 +27,7 @@ A session-to-session handoff relay for Claude Code. On session end, a detached h
 | `RELAY_DISABLED` | - | `1` でそのプロジェクト無効（`.claude/settings.json` の `env` に設定） |
 | `RELAY_MODEL` | `claude-haiku-4-5` | 記録に使う headless モデル |
 | `RELAY_MIN_USER_MSGS` | `3` | これ未満のユーザー発言数ならスキップ |
-| `RELAY_CLEAR_API_KEY` | - | `1` で記録時に `ANTHROPIC_API_KEY` を外し、claude.ai サブスクリプション認証で実行 |
+| `RELAY_KEEP_API_KEY` | - | `1` で記録時も `ANTHROPIC_API_KEY` を使う。既定では除去して claude.ai サブスクリプション認証で実行する（このキーは設定されているとサブスクより優先され、headless 実行では確認なしに使われるため、無効なキーが残っていると記録係が 401 で死ぬ） |
 
 例: 特定フォルダ配下だけで使う（ユーザー settings.json）
 
