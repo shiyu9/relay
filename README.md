@@ -11,6 +11,7 @@ A session-to-session handoff relay for Claude Code. On session end, a detached h
   - `knowledge/pitfalls.md` / `knowledge/workflow.md` — 実際の失敗・訂正から生まれた永続知見のみを `[日付]` 付き命令形で単純追記（各ファイル約80行上限）
   - ユーザー発言が閾値未満の薄いセッションはスキップ（利用枠を消費しない）
 - **SessionStart**（新規起動・/clear 後のみ、resume では動かない）: knowledge 全文＋直近2日分の日記を注入。矛盾・重複・陳腐化の整理はセッション本体の Claude が前置き指示に従って行う（判断できない矛盾はユーザーに確認）
+- **キャッチアップ**: ウィンドウがセッション終了と同時に閉じる構成などで SessionEnd フックが完走できず記録が落ちた場合、次の SessionStart 時に検出して記録し直す（30分以上更新のない未記録トランスクリプトが対象、1回の起動で最大3件、直近14日以内）
 
 ## インストール / Install
 
@@ -38,7 +39,8 @@ A session-to-session handoff relay for Claude Code. On session end, a detached h
 ## 注意 / Notes
 
 - セッション終了ごとに headless Claude が1回走り、サブスクリプション利用枠を少し消費します。/ Each session end consumes a small amount of your subscription quota.
-- ウィンドウ強制クローズ等でプロセスが殺された場合は記録されません（SessionEnd フックが発火しないため）。
+- ウィンドウ強制クローズ等で SessionEnd フックが走れなかったセッションは、その場では記録されず、次にそのプロジェクトでセッションを開始したときにキャッチアップで記録されます。
+- **ターミナルが claude の終了と同時に自動で閉じる構成**（ランチャーやラッパースクリプト経由など）では、フックが起動を完了する前にコンソールごと殺され、その場での記録が失われやすくなります（キャッチアップで後から回収はされます）。即時記録を維持したい場合は、ラッパーの claude 呼び出しの後に数秒のディレイを入れてください。例（PowerShell）: `claude; Start-Sleep -Seconds 2`
 - **v0.1 は Windows でのみ動作検証済み**です。コードは macOS/Linux を考慮していますが未検証です。/ v0.1 is only tested on Windows; macOS/Linux paths exist in code but are unverified.
 - 実行ログ: `~/.claude/relay/log.txt`（スキップ理由・起動記録）、`~/.claude/relay/last_run.log`（直近の headless 出力）
 

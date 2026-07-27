@@ -1,19 +1,18 @@
 """relay SessionEnd hook.
 
-Guards, then spawns the detached recorder (relay_recorder.py), which runs
-a read-only headless Claude and appends diary/knowledge deterministically.
-Never blocks the ending session: every guard exits 0.
+Spawns the detached recorder (relay_recorder.py) as fast as possible and
+does nothing else. In terminal setups where the window closes together
+with claude, this hook can be killed mid-flight at any moment (observed:
+sometimes before it can even log one line), so anything heavier than
+"resolve transcript, log, Popen" lives in the recorder, which survives
+the console teardown once spawned. Never blocks the ending session:
+every guard exits 0.
 """
-import json
 import os
-import pathlib
-import shutil
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from relay_common import (
-    build_recorder_env,
     derive_transcript_path,
     force_utf8,
     in_scope,
@@ -21,38 +20,8 @@ from relay_common import (
     is_reentry,
     log,
     read_hook_input,
+    spawn_recorder,
 )
-
-DEFAULT_MIN_USER_MSGS = 3
-
-
-def count_user_messages(transcript_path):
-    """Rough count of real user messages. On any parse trouble, return None."""
-    try:
-        count = 0
-        parsed = 0
-        with open(transcript_path, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                parsed += 1
-                if obj.get("type") != "user":
-                    continue
-                content = obj.get("message", {}).get("content")
-                if isinstance(content, list) and any(
-                    isinstance(b, dict) and b.get("type") == "tool_result" for b in content
-                ):
-                    continue
-                count += 1
-        if parsed == 0:
-            return None  # nothing parseable -> treat count as unknown
-        return count
-    except OSError:
-        return None
 
 
 def main():
@@ -81,30 +50,10 @@ def main():
         log("end", "skip: no transcript")
         return
 
-    min_msgs = int(os.environ.get("RELAY_MIN_USER_MSGS", DEFAULT_MIN_USER_MSGS))
-    n = count_user_messages(transcript)
-    if n is not None and n < min_msgs:
-        log("end", f"skip: thin session ({n} user msgs < {min_msgs})")
-        return
-
-    if not shutil.which("claude"):
-        log("end", "skip: claude CLI not found")
-        return
-
-    recorder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "relay_recorder.py")
-    env = build_recorder_env(os.environ)
-
-    kwargs = {"cwd": cwd, "env": env, "stdout": subprocess.DEVNULL,
-              "stderr": subprocess.DEVNULL, "stdin": subprocess.DEVNULL}
-    if os.name == "nt":
-        kwargs["creationflags"] = (
-            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-        )
-    else:
-        kwargs["start_new_session"] = True
-
-    subprocess.Popen([sys.executable, recorder, transcript, cwd], **kwargs)
-    log("end", f"spawned recorder for {cwd} ({n} user msgs)")
+    # Log before spawning: if the console dies during Popen, the trail
+    # still shows how far we got.
+    log("end", f"spawning recorder for {cwd}")
+    spawn_recorder(cwd, transcript)
 
 
 if __name__ == "__main__":

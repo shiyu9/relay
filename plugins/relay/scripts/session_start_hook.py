@@ -4,11 +4,18 @@ Injects the project's knowledge files and the two most recent diary files
 into the new session's context (stdout of a SessionStart hook is added as
 context). Runs only on startup/clear (matcher + guard); silent when there
 is nothing to inject.
+
+Also runs catch-up: sessions whose SessionEnd hook was killed before it
+could spawn the recorder (e.g. the terminal window closed together with
+claude) left ended transcripts with no ledger marker; they get a detached
+recorder now. Session start never races console teardown, so this is the
+reliable half of the recording pipeline.
 """
 import os
 import pathlib
 import re
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from relay_common import (
@@ -16,9 +23,23 @@ from relay_common import (
     in_scope,
     is_disabled,
     is_reentry,
+    ledger_dir,
     log,
+    mark_recorded,
     read_hook_input,
+    recorded_size,
+    spawn_recorder,
+    transcripts_dir,
 )
+
+# A transcript untouched this long is considered ended, not idle-but-open.
+# Too low records a session someone merely walked away from; the cost of
+# too high is only a later catch-up.
+CATCHUP_IDLE_SECS = 30 * 60
+# Do not resurrect ancient history into today's diary.
+CATCHUP_WINDOW_DAYS = 14
+# Bound headless spawns per session start; the rest are caught next time.
+CATCHUP_MAX_SPAWNS = 3
 
 PREAMBLE = """# relay: 前セッションからの引き継ぎ
 
@@ -36,6 +57,47 @@ def read_file(path):
         return path.read_text(encoding="utf-8", errors="replace").strip()
     except OSError:
         return None
+
+
+def catch_up(cwd, now=None):
+    """Spawn recorders for ended-but-unprocessed transcripts of this project."""
+    tdir = transcripts_dir(cwd)
+    if not tdir.is_dir():
+        return
+    now = time.time() if now is None else now
+
+    entries = []
+    for p in tdir.glob("*.jsonl"):
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        entries.append((p, st.st_mtime, st.st_size))
+
+    if not ledger_dir(cwd).is_dir():
+        # First catch-up for this project: adopt existing transcripts as
+        # already handled, instead of recording weeks-old sessions into
+        # today's diary.
+        ledger_dir(cwd).mkdir(parents=True, exist_ok=True)
+        for p, _, size in entries:
+            mark_recorded(cwd, p.stem, size)
+        if entries:
+            log("start", f"ledger initialized: adopted {len(entries)} transcripts for {cwd}")
+        return
+
+    spawned = 0
+    for p, mtime, size in sorted(entries, key=lambda e: e[1], reverse=True):
+        if spawned >= CATCHUP_MAX_SPAWNS:
+            break
+        age = now - mtime
+        if age < CATCHUP_IDLE_SECS or age > CATCHUP_WINDOW_DAYS * 86400:
+            continue
+        if recorded_size(cwd, p.stem) == size:
+            continue
+        spawn_recorder(cwd, p)
+        spawned += 1
+    if spawned:
+        log("start", f"catch-up: spawned {spawned} recorder(s) for {cwd}")
 
 
 def main():
@@ -72,12 +134,15 @@ def main():
             if content:
                 sections.append(f"## diary/{p.name}\n\n{content}")
 
-    if not sections:
-        return
+    if sections:
+        print(PREAMBLE)
+        print("\n\n".join(sections))
+        log("start", f"injected {len(sections)} sections for {cwd}")
 
-    print(PREAMBLE)
-    print("\n\n".join(sections))
-    log("start", f"injected {len(sections)} sections for {cwd}")
+    try:
+        catch_up(cwd)
+    except Exception as e:  # catch-up must never break injection/startup
+        log("start", f"catch-up error: {e!r}")
 
 
 if __name__ == "__main__":

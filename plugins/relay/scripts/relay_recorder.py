@@ -15,9 +15,17 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from relay_common import force_utf8, local_now, log
+from relay_common import (
+    count_user_messages,
+    force_utf8,
+    local_now,
+    log,
+    mark_recorded,
+    recorded_size,
+)
 
 DEFAULT_MODEL = "claude-haiku-4-5"
+DEFAULT_MIN_USER_MSGS = 3
 
 PROMPT_TEMPLATE = """You are the "relay" session recorder. Summarize the finished Claude Code \
 session below for the next session. You must NOT modify any file — read the \
@@ -112,6 +120,26 @@ def main():
     pitfalls_path = project / "knowledge" / "pitfalls.md"
     workflow_path = project / "knowledge" / "workflow.md"
 
+    # Guards live here, not in the SessionEnd hook: the hook must reach
+    # Popen before a closing console kills it, so once detached we do the
+    # filtering. Skips are marked in the ledger so SessionStart catch-up
+    # does not retry them; failures are not, so catch-up can.
+    session_id = pathlib.Path(transcript).stem
+    try:
+        size = os.path.getsize(transcript)
+    except OSError:
+        size = None
+    if size is not None and recorded_size(cwd, session_id) == size:
+        log("rec", f"skip: already recorded ({session_id})")
+        return
+    min_msgs = int(os.environ.get("RELAY_MIN_USER_MSGS", DEFAULT_MIN_USER_MSGS))
+    n = count_user_messages(transcript)
+    if n is not None and n < min_msgs:
+        log("rec", f"skip: thin session ({n} user msgs < {min_msgs})")
+        if size is not None:
+            mark_recorded(cwd, session_id, size)
+        return
+
     claude = shutil.which("claude")
     if not claude:
         log("rec", "abort: claude CLI not found")
@@ -141,6 +169,8 @@ def main():
         return
     if "NOTHING_TO_RECORD" in out and "===DIARY===" not in out:
         log("rec", "skip: nothing to record")
+        if size is not None:
+            mark_recorded(cwd, session_id, size)
         return
     sections = parse_sections(out)
     if not sections:
@@ -161,6 +191,8 @@ def main():
         if items:
             append_block(path, "\n".join(items))
             wrote.append(f"{path.name} +{len(items)}")
+    if size is not None:
+        mark_recorded(cwd, session_id, size)
     log("rec", f"recorded: {', '.join(wrote) if wrote else 'nothing'} in {cwd}")
 
 
