@@ -40,8 +40,9 @@ A session-to-session handoff relay for Claude Code. On session end, a detached h
 
 - セッション終了ごとに headless Claude が1回走り、サブスクリプション利用枠を少し消費します。/ Each session end consumes a small amount of your subscription quota.
 - ウィンドウ強制クローズ等で SessionEnd フックが走れなかったセッションは、その場では記録されず、次にそのプロジェクトでセッションを開始したときにキャッチアップで記録されます。
+- キャッチアップが回収するのは、そのプロジェクトで**プラグイン導入後に最初にセッションを開始した時点**より後に終了したセッションです。この初回起動時に既存のトランスクリプトは「記録済み」として台帳に登録されるため、導入前に失われたセッションは遡って回収されません（過去数週間分のセッションが当日の日記にまとめて記録されるのを防ぐための仕様です）。
 - **ターミナルが claude の終了と同時に自動で閉じる構成**（ランチャーやラッパースクリプト経由など）では、フックが起動を完了する前にコンソールごと殺され、その場での記録が失われやすくなります（キャッチアップで後から回収はされます）。即時記録を維持したい場合は、ラッパーの claude 呼び出しの後に数秒のディレイを入れてください。例（PowerShell）: `claude; Start-Sleep -Seconds 2`
-- **v0.1 は Windows でのみ動作検証済み**です。コードは macOS/Linux を考慮していますが未検証です。/ v0.1 is only tested on Windows; macOS/Linux paths exist in code but are unverified.
+- **Windows でのみ動作検証済み**です。コードは macOS/Linux を考慮していますが未検証です。/ Only tested on Windows; macOS/Linux paths exist in code but are unverified.
 - 実行ログ: `~/.claude/relay/log.txt`（スキップ理由・起動記録）、`~/.claude/relay/last_run.log`（直近の headless 出力）
 
 ## License
