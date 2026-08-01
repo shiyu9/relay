@@ -58,6 +58,12 @@ A session-to-session handoff relay for Claude Code. On session end, a detached h
 - **Windows でのみ動作検証済み**です。コードは macOS/Linux を考慮していますが未検証です。/ Only tested on Windows; macOS/Linux paths exist in code but are unverified.
 - 実行ログ: `~/.claude/relay/log.txt`（スキップ理由・起動記録）、`~/.claude/relay/last_run.log`（直近の headless 出力）
 
+## 申し送り / Handoff（開発者向け）
+
+- **v0.4.0（2026-08-01）で `status.md` 層を追加**。このリポジトリ自体ではまだ一度も生成されていない。次にこのプロジェクトでセッションを終えたときが初回で、そこで `status.md` と台帳の `.status` サイドカーが作られる。
+- **実運用での未確認点**: 記録モデル（既定 `claude-haiku-4-5`）が `===STATUS===` を安定して出すか。出さなかった場合は「空セクション＝更新なし」の仕様により `status.md` が作られない（既存も壊れない）だけなので害はないが、プロンプトの調整が要る。`~/.claude/relay/last_run.log` に生の出力が残る。
+- **`showThinkingSummaries` の検証は開発者個人の設定で行ったもの**。既定は `false` で、利用者の環境ではオプトインしない限り thinking は空のまま。レコーダーは thinking 非依存を維持しているので、どちらでも全機能が動く。
+
 ## License
 
 MIT
