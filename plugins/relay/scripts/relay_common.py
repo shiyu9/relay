@@ -124,6 +124,11 @@ def ledger_dir(cwd):
     return pathlib.Path.home() / ".claude" / "relay" / "ledger" / sanitize_cwd(cwd)
 
 
+# Sits beside the per-session markers in ledger_dir; the leading dot cannot
+# collide with a session id (those are UUIDs).
+STATUS_MARKER = ".status"
+
+
 def recorded_size(cwd, session_id):
     """Transcript size stored when it was last processed, or None."""
     try:
@@ -141,6 +146,44 @@ def mark_recorded(cwd, session_id, size):
         (d / session_id).write_text(str(size), encoding="ascii")
     except OSError:
         pass
+
+
+def status_path(cwd):
+    """The project's single-page "what is still open" file."""
+    return pathlib.Path(cwd) / "status.md"
+
+
+def status_source_mtime(cwd):
+    """mtime of the transcript whose recorder last wrote status.md, or None.
+
+    None means "unknown" and deliberately fails open: a missing or corrupt
+    marker must not freeze status.md forever.
+    """
+    try:
+        return float((ledger_dir(cwd) / STATUS_MARKER).read_text(encoding="ascii"))
+    except (OSError, ValueError):
+        return None
+
+
+def mark_status_written(cwd, mtime):
+    """status.md is overwritten, not appended, so unlike the diary it needs an
+    ordering guard: catch-up can spawn recorders for several sessions at once
+    and an older one finishing last would otherwise clobber a newer status."""
+    try:
+        d = ledger_dir(cwd)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / STATUS_MARKER).write_text(repr(float(mtime)), encoding="ascii")
+    except OSError:
+        pass
+
+
+def write_atomic(path, text):
+    """Replace a file in one step, so a crash mid-write cannot truncate it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    os.replace(tmp, path)
 
 
 def count_user_messages(transcript_path):

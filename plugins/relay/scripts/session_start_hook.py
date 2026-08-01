@@ -29,6 +29,7 @@ from relay_common import (
     read_hook_input,
     recorded_size,
     spawn_recorder,
+    status_path,
     transcripts_dir,
 )
 
@@ -49,6 +50,8 @@ PREAMBLE = """# relay: 前セッションからの引き継ぎ
 1. knowledge/ 内に重複・矛盾・80行超過に気づいたら、新しい情報を正として統合・修正・剪定する。更新は上書きし、古い項目を残さない。
 2. [日付] が古い項目に依拠する前に実態を確認する。実態が変わっていたら項目を修正または削除する。
 3. どちらが正しいか判断できない矛盾は、勝手に決めずユーザーに確認する。
+
+status.md は「いま終わっていないこと」だけを載せた一枚で、セッション終了時にレコーダーが毎回上書きして維持する。読む対象であり、セッション中に手で編集しない（次の記録で上書きされる）。
 """
 
 
@@ -133,6 +136,14 @@ def main():
             content = read_file(p)
             if content:
                 sections.append(f"## diary/{p.name}\n\n{content}")
+
+    # Last on purpose: status is rewritten every session, so keeping it at the
+    # end leaves the longest shared prefix for caching (and puts the most
+    # actionable page closest to the conversation).
+    status = read_file(status_path(cwd))
+    if status:
+        sections.append(
+            "## status.md（未完了の作業・保留中の確認・次のアクション）\n\n" + status)
 
     if sections:
         print(PREAMBLE)
