@@ -1,16 +1,17 @@
 # relay
 
-セッション間の引き継ぎリレー。Claude Code のセッション終了時に会話ログから**日記**（時系列の引き継ぎ）と**ナレッジ**（永続知見）を自動記録し、次のセッション開始時に自動注入するプラグイン。
+セッション間の引き継ぎリレー。Claude Code のセッション終了時に会話ログから**日記**（時系列の引き継ぎ）・**ナレッジ**（永続知見）・**ステータス**（現在の未完了）を自動記録し、次のセッション開始時に自動注入するプラグイン。
 
-A session-to-session handoff relay for Claude Code. On session end, a detached headless Claude reads the transcript and records a **diary** (chronological handoff) and **knowledge** (durable lessons); on session start, they are injected back into context.
+A session-to-session handoff relay for Claude Code. On session end, a detached headless Claude reads the transcript and records a **diary** (chronological handoff), **knowledge** (durable lessons) and a **status** page (what is still open); on session start, they are injected back into context.
 
 ## 仕組み / How it works
 
 - **SessionEnd**: フックが headless Claude（既定: Haiku 4.5）をデタッチ起動。transcript を読んで以下を書く:
   - `diary/YYYY-MM-DD.md` — セッションごとに `## S<n> HH:MM` + `done / decisions / mistakes / handoff`
   - `knowledge/pitfalls.md` / `knowledge/workflow.md` — 実際の失敗・訂正から生まれた永続知見のみを `[日付]` 付き命令形で単純追記（各ファイル約80行上限）
+  - `status.md`（プロジェクト直下）— 「いま終わっていないこと」だけを載せた一枚。追記ではなく**毎回上書き**で維持する。旧 status をモデルに渡して差分更新させ、今回触れなかった項目は残る。日記の `handoff` が「その時点の申し送り」という履歴なのに対し、status は常に現在の状態を指す
   - ユーザー発言が閾値未満の薄いセッションはスキップ（利用枠を消費しない）
-- **SessionStart**（新規起動・/clear 後のみ、resume では動かない）: knowledge 全文＋直近2日分の日記を注入。矛盾・重複・陳腐化の整理はセッション本体の Claude が前置き指示に従って行う（判断できない矛盾はユーザーに確認）
+- **SessionStart**（新規起動・/clear 後のみ、resume では動かない）: knowledge 全文＋直近2日分の日記＋ status.md を、この順（変わりにくいものから変わりやすいものへ）で注入。矛盾・重複・陳腐化の整理はセッション本体の Claude が前置き指示に従って行う（判断できない矛盾はユーザーに確認）。status.md はレコーダーが唯一の書き手で、セッション本体は読むだけ
 - **キャッチアップ**: ウィンドウがセッション終了と同時に閉じる構成などで SessionEnd フックが完走できず記録が落ちた場合、次の SessionStart 時に検出して記録し直す（30分以上更新のない未記録トランスクリプトが対象、1回の起動で最大3件、直近14日以内）
 
 ## インストール / Install
@@ -35,6 +36,18 @@ A session-to-session handoff relay for Claude Code. On session end, a detached h
 ```json
 { "env": { "RELAY_SCOPE": "C:\\claude-projects" } }
 ```
+
+### 任意: thinking summary を記録に活かす
+
+`~/.claude/settings.json` に `"showThinkingSummaries": true` を入れると（`/config` からは設定できません）、Claude Code が API に `thinking.display: "summarized"` を要求し、thinking の中身が transcript に残るようになります。relay はそれを **decisions**（捨てた案・検討過程）と **mistakes**（なぜ誤った判断をしたか）の根拠に使います。`done` / `handoff` には効きません。
+
+```json
+{ "showThinkingSummaries": true }
+```
+
+- **対話セッションでのみ有効**です。`claude -p`（headless）は `--output-format text` のとき常に `omitted` に固定され、この設定は参照されません。relay のレコーダー自身が headless で走ることには影響しません。
+- 表示が変わるだけで、thinking トークンの消費＝課金は変わりません。
+- `false`（既定）でも relay は全機能そのまま動きます。transcript の thinking が空なら、レコーダーはそれを使わないだけです。
 
 ## 注意 / Notes
 
