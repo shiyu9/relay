@@ -97,10 +97,23 @@ jsonl に summary が入ることを確認してからプロンプトを改修�
 > 決められなかった。`claude -p --settings '{"showThinkingSummaries":true|false}'` での
 > A/B は上記のとおり headless では差が出ようがなく、無効な試験だった。
 >
-> → 案3-1・案3-2 とも実装済み。残るは「`summarized` の内容が実際に jsonl に永続化される」
-> ことの実地確認のみ (フラグは 2026-08-01 に `~/.claude/settings.json` へ投入済み。
-> 過去のデスクトップ由来セッションで非空 thinking が実際に残っているため、内容が届けば
-> 永続化されること自体は実証済み)。
+> **実地確認 (2026-08-01・フラグの効果を確認)**
+>
+> `~/.claude/settings.json` に `"showThinkingSummaries": true` を入れたうえで
+> relay-test プロジェクトで対話セッションを1回回し、同一プロジェクト・同一 entrypoint
+> (`cli`)・同一バージョン (2.1.220)・同一モデル (`claude-opus-5`) の前後で比較した:
+>
+> | セッション | フラグ | 非空 thinking | 空 |
+> |---|---|---|---|
+> | 7793a476 (前) | 未設定 | 0 | 14 |
+> | fd8ab347 (後) | true | **2** | 0 |
+>
+> 実際に記録された中身の例 (`len=292`, `signature` 付き):
+> 「ファイルは実際に存在していて、CLAUDE.md と diary/2026-07-25.md があるが knowledge/
+> ディレクトリはない。質問の後半で「無ければ」という条件付きで設計提案を求められているけれど、
+> その条件が満たされていないので、まずはファイルが存在することを正直に報告する必要がある。…」
+>
+> → 要望書の主張は正しい。案3-1・案3-2 とも実装済みで、README の推奨記述はそのまま維持する。
 
 **根拠**:
 - https://platform.claude.com/docs/en/build-with-claude/thinking
