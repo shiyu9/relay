@@ -1,64 +1,40 @@
-"""relay SessionEnd hook.
+"""relay SessionEnd hook — drops one marker and does nothing else.
 
-Spawns the detached recorder (relay_recorder.py) as fast as possible and
-does nothing else. In terminal setups where the window closes together
-with claude, this hook can be killed mid-flight at any moment (observed:
-sometimes before it can even log one line), so anything heavier than
-"resolve transcript, log, Popen" lives in the recorder, which survives
-the console teardown once spawned. Never blocks the ending session:
-every guard exits 0.
+Earlier versions started the recorder here. In terminal setups where the
+window closes together with claude the hook can be killed mid-flight at any
+moment (observed: sometimes before it can log a single line), so recording
+moved to SessionStart entirely. What remains is the one fact SessionStart
+cannot learn on its own: that this session is over rather than merely quiet.
+
+Without the marker, detection has to wait out the idle threshold, and a
+session closed and reopened a minute later would hand nothing to its
+successor. Creating an empty file is the cheapest thing this hook could
+possibly do, and if even that is cut short the idle rule still catches up —
+so the marker is an optimisation, never a dependency.
 """
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from relay_common import (
-    derive_transcript_path,
-    force_utf8,
-    in_scope,
-    is_disabled,
-    is_reentry,
-    log,
-    read_hook_input,
-    spawn_recorder,
-)
+from relay_common import ended_dir, in_scope, is_disabled, read_hook_input
 
 
 def main():
-    force_utf8()
-    if is_reentry():
-        log("end", "skip: reentry guard")
-        return
     if is_disabled():
-        log("end", "skip: RELAY_DISABLED")
         return
-
     data = read_hook_input()
     cwd = data.get("cwd") or os.getcwd()
-    reason = data.get("reason", "")
-    if reason == "logout":
-        log("end", "skip: logout")
+    session_id = data.get("session_id")
+    if not session_id or not in_scope(cwd):
         return
-    if not in_scope(cwd):
-        log("end", f"skip: out of scope ({cwd})")
-        return
-
-    transcript = data.get("transcript_path")
-    if not transcript or not os.path.isfile(transcript):
-        transcript = derive_transcript_path(cwd, data.get("session_id"))
-    if not transcript:
-        log("end", "skip: no transcript")
-        return
-
-    # Log before spawning: if the console dies during Popen, the trail
-    # still shows how far we got.
-    log("end", f"spawning recorder for {cwd}")
-    spawn_recorder(cwd, transcript)
+    d = ended_dir(cwd)
+    d.mkdir(parents=True, exist_ok=True)
+    open(d / str(session_id), "w").close()
 
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception as e:  # never break session shutdown
-        log("end", f"error: {e!r}")
+    except Exception:  # never break session shutdown, and never spend time
+        pass           # explaining why: the idle fallback covers this
     sys.exit(0)

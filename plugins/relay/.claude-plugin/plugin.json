@@ -1,7 +1,7 @@
 {
   "name": "relay",
-  "description": "SessionEndで会話ログから日記とナレッジを自動生成し、SessionStartで次のセッションに注入する。セッション間の引き継ぎリレー。",
-  "version": "0.3.0",
+  "description": "会話ログから日記・ナレッジ・現在地を書き起こし、次のセッション開始時に注入する。記録はセッション自身のサブエージェントが行うのでヘッドレスCLIを必要としない。",
+  "version": "0.5.0",
   "author": {
     "name": "Anlan"
   }

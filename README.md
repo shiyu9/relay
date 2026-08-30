@@ -1,18 +1,61 @@
 # relay
 
-セッション間の引き継ぎリレー。Claude Code のセッション終了時に会話ログから**日記**（時系列の引き継ぎ）・**ナレッジ**（永続知見）・**ステータス**（現在の未完了）を自動記録し、次のセッション開始時に自動注入するプラグイン。
+セッション間の引き継ぎリレー。Claude Code の会話ログ（transcript）から**日記**（セッションごとの記録）・**ナレッジ**（永続知見）・**現在地**を自動で書き起こし、次のセッション開始時に注入するプラグイン。
 
-A session-to-session handoff relay for Claude Code. On session end, a detached headless Claude reads the transcript and records a **diary** (chronological handoff), **knowledge** (durable lessons) and a **status** page (what is still open); on session start, they are injected back into context.
+A session-to-session handoff relay for Claude Code. It turns each transcript into a **diary** entry, distils durable **knowledge** and a single **current** page, and injects them back at the start of the next session.
+
+**記録はセッション自身のサブエージェントが行うため、ヘッドレスの `claude` CLI を必要としません。** / Recording runs as a subagent of the session itself, so no headless `claude` CLI is required.
 
 ## 仕組み / How it works
 
-- **SessionEnd**: フックが headless Claude（既定: Haiku 4.5）をデタッチ起動。transcript を読んで以下を書く:
-  - `diary/YYYY-MM-DD.md` — セッションごとに `## S<n> HH:MM` + `done / decisions / mistakes / handoff`
-  - `knowledge/pitfalls.md` / `knowledge/workflow.md` — 実際の失敗・訂正から生まれた永続知見のみを `[日付]` 付き命令形で単純追記（各ファイル約80行上限）
-  - `status.md`（プロジェクト直下）— 「いま終わっていないこと」だけを載せた一枚。追記ではなく**毎回上書き**で維持する。旧 status をモデルに渡して差分更新させ、今回触れなかった項目は残る。日記の `handoff` が「その時点の申し送り」という履歴なのに対し、status は常に現在の状態を指す
-  - ユーザー発言が閾値未満の薄いセッションはスキップ（利用枠を消費しない）
-- **SessionStart**（新規起動・/clear 後のみ、resume では動かない）: knowledge 全文＋直近2日分の日記＋ status.md を、この順（変わりにくいものから変わりやすいものへ）で注入。矛盾・重複・陳腐化の整理はセッション本体の Claude が前置き指示に従って行う（判断できない矛盾はユーザーに確認）。status.md はレコーダーが唯一の書き手で、セッション本体は読むだけ
-- **キャッチアップ**: ウィンドウがセッション終了と同時に閉じる構成などで SessionEnd フックが完走できず記録が落ちた場合、次の SessionStart 時に検出して記録し直す（30分以上更新のない未記録トランスクリプトが対象、1回の起動で最大3件、直近14日以内）
+### 1 transcript = 1 日記エントリ
+
+日記のエントリは**そのセッション自身の日付**のファイルに置かれ、見出しに時間帯とセッション ID を持つ。
+
+```
+diary/2026-08-27.md
+
+## S1 19:11-22:30 (124c52dd)
+### done
+- 実際に達成したこと
+### decisions
+- 下した判断とその理由
+### mistakes
+- 誤り・手戻り
+### handoff
+- 次のセッションに要ること
+```
+
+同一性が ID で決まるので、**同じセッションを二重に記録しない。**resume で transcript が伸びたときは、新しい要約でそのエントリを**丸ごと差し替える**（追記して2つに分かれることがない）。
+
+**relay 側に「何日前まで」という窓は無い。**Claude Code が `cleanupPeriodDays`（既定30日）で transcript を消すので、残っているものはすべて記録の対象になる。
+
+### 3つのフック
+
+- **SessionStart**（新規起動・`/clear` 後のみ）
+  - `knowledge/pitfalls.md` `workflow.md` `decided.md`、**日記の直近5エントリ**、`knowledge/current.md` をこの順に注入する（変わりにくいものから変わりやすいものへ）
+  - 未記録の transcript があれば、それを記録する**手順**も注入する。手順はセッション自身が実行する:
+    1. 記録ジョブ（transcript 1本につき1回・最大3本）をサブエージェントで実行
+    2. `relay_apply.py` が結果をファイルへ反映し、要約を1行返す
+    3. 日記が書かれていれば「現在地・見送り」ジョブを実行して再度反映
+    4. `knowledge/` が80行を超えていれば剪定ジョブを実行して再度反映
+  - **ジョブの本文はファイルに置かれ、サブエージェントだけが読む。**本体のコンテキストには数行の手順しか入らない
+- **SessionEnd** — `~/.claude/relay/ended/` に空ファイルを1つ作るだけ。「このセッションは終了した」という事実だけを残す。これがあると、閉じてすぐ開き直しても直前のセッションがその場で記録される（無ければ「30分以上更新なし」で判定する）
+- **Stop** — 未記録の transcript が残ったまま進んでいるときだけ、記録を促す。プロジェクト単位で30分のクールダウンがあり、公式の `stop_hook_active` ガードで自分の促しには反応しない
+
+### 4つのファイル
+
+| ファイル | 性質 | 誰が書くか |
+|---|---|---|
+| `diary/YYYY-MM-DD.md` | セッションごとの記録。エントリ単位で差し替え | relay |
+| `knowledge/pitfalls.md` | 技術的な罠と回避策。追記＋剪定 | relay |
+| `knowledge/workflow.md` | このユーザーとの進め方の学び。追記＋剪定 | relay |
+| `knowledge/current.md` | **現在地**。1つの節・毎回上書き・行数の上限なし | relay |
+| `knowledge/decided.md` | 見送った案と**再開条件**。毎回上書き・剪定あり | relay |
+
+`current.md` と `decided.md` は**レコーダーが唯一の書き手**で、セッション中に手で編集しない（次の記録で上書きされる）。`decided.md` から落ちた項目は、Python がその日の日記に記録するので**消えた理由をあとから追える**。
+
+**ファイルへの書き込みはすべて Python が決定的に行う。**サブエージェントは区切り付きのテキストを一時ファイルへ出すだけで、日記もナレッジも直接触らない（安価なモデルに追記を任せて既存エントリを消失させた実バグがある）。
 
 ## インストール / Install
 
@@ -27,9 +70,8 @@ A session-to-session handoff relay for Claude Code. On session end, a detached h
 |---|---|---|
 | `RELAY_SCOPE` | (なし=全プロジェクト) | このパス配下のプロジェクトだけで動作 |
 | `RELAY_DISABLED` | - | `1` でそのプロジェクト無効（`.claude/settings.json` の `env` に設定） |
-| `RELAY_MODEL` | `claude-haiku-4-5` | 記録に使う headless モデル |
-| `RELAY_MIN_USER_MSGS` | `3` | これ未満のユーザー発言数ならスキップ |
-| `RELAY_KEEP_API_KEY` | - | `1` で記録時も `ANTHROPIC_API_KEY` を使う。既定では除去して claude.ai サブスクリプション認証で実行する（このキーは設定されているとサブスクより優先され、headless 実行では確認なしに使われるため、無効なキーが残っていると記録係が 401 で死ぬ） |
+| `RELAY_MODEL` | `claude-haiku-4-5` | 記録のサブエージェントに指定するモデル |
+| `RELAY_MIN_USER_MSGS` | `3` | これ未満のユーザー発言数のセッションは記録しない |
 
 例: 特定フォルダ配下だけで使う（ユーザー settings.json）
 
@@ -45,18 +87,18 @@ A session-to-session handoff relay for Claude Code. On session end, a detached h
 { "showThinkingSummaries": true }
 ```
 
-- **対話セッションでのみ有効**です。`claude -p`（headless）は `--output-format text` のとき常に `omitted` に固定され、この設定は参照されません。relay のレコーダー自身が headless で走ることには影響しません。
 - 表示が変わるだけで、thinking トークンの消費＝課金は変わりません。
-- `false`（既定）でも relay は全機能そのまま動きます。transcript の thinking が空なら、レコーダーはそれを使わないだけです。
+- `false`（既定）でも relay は全機能そのまま動きます。transcript の thinking が空なら、記録係はそれを使わないだけです。
 
 ## 注意 / Notes
 
-- セッション終了ごとに headless Claude が1回走り、サブスクリプション利用枠を少し消費します。/ Each session end consumes a small amount of your subscription quota.
-- ウィンドウ強制クローズ等で SessionEnd フックが走れなかったセッションは、その場では記録されず、次にそのプロジェクトでセッションを開始したときにキャッチアップで記録されます。
-- キャッチアップが回収するのは、そのプロジェクトで**プラグイン導入後に最初にセッションを開始した時点**より後に終了したセッションです。この初回起動時に既存のトランスクリプトは「記録済み」として台帳に登録されるため、導入前に失われたセッションは遡って回収されません（過去数週間分のセッションが当日の日記にまとめて記録されるのを防ぐための仕様です）。
-- **ターミナルが claude の終了と同時に自動で閉じる構成**（ランチャーやラッパースクリプト経由など）では、フックが起動を完了する前にコンソールごと殺され、その場での記録が失われやすくなります（キャッチアップで後から回収はされます）。即時記録を維持したい場合は、ラッパーの claude 呼び出しの後に数秒のディレイを入れてください。例（PowerShell）: `claude; Start-Sleep -Seconds 2`
+- **導入直後は、残っている transcript を遡って記録します。**1回の起動につき最大3本なので、履歴の多いプロジェクトでは数回〜十数回の起動をかけて埋まります。それぞれのエントリは**そのセッション自身の日付**のファイルに入るので、当日の日記に過去がまとめて流れ込むことはありません。
+- 記録はセッション開始時に走るため、**起動が少し待たされます。**その代わり、ヘッドレスの `claude` CLI が使えない環境でも動きます。
+- サブエージェントは中間結果を `~/.claude/relay/inbox/` に書きます。プロジェクト外への書き込みなので、環境によっては許可を求められます。毎回聞かれるのが煩わしい場合は settings.json の `permissions.allow` に `Write(//<ホーム>/.claude/relay/**)` を足してください。
+- **日記のファイルを手で消すと、その範囲が次の起動で記録し直されます**（未記録かどうかを日記そのものから判定しているため）。
+- 記録は transcript が残っている間だけ可能です。`cleanupPeriodDays`（既定30日）を過ぎた分は遡れません。
 - **Windows でのみ動作検証済み**です。コードは macOS/Linux を考慮していますが未検証です。/ Only tested on Windows; macOS/Linux paths exist in code but are unverified.
-- 実行ログ: `~/.claude/relay/log.txt`（スキップ理由・起動記録）、`~/.claude/relay/last_run.log`（直近の headless 出力）
+- 実行ログ: `~/.claude/relay/log.txt`
 
 ## License
 
