@@ -42,6 +42,9 @@ from relay_detect import plan_entry
 SECTION_RE = re.compile(
     r"===(PRUNE_PITFALLS|PRUNE_WORKFLOW|DIARY|PITFALLS|WORKFLOW|CURRENT|DECIDED"
     r"|MOVE|END)===")
+# The bullet marker and any date the model wrote anyway. Only a bracket that
+# starts with a date is eaten: "- [進行中] ..." is content, not a stamp.
+DATE_PREFIX_RE = re.compile(r"^-\s*(?:\[\s*\d{4}-\d{1,2}-\d{1,2}[^]]*\]\s*)?")
 
 
 def parse_sections(text):
@@ -53,13 +56,25 @@ def parse_sections(text):
     return found
 
 
-def bullets_only(section, existing_text):
-    """Bullet lines that are not literal duplicates of what is already there."""
+def knowledge_bullets(section, existing_text, date):
+    """Bullet lines to append, each stamped with `date`.
+
+    The model is told not to write a date at all. Asked for one it used the
+    date it found inside the transcript rather than the one it was handed,
+    and left it off one line in three entirely — and `[日付]` is what the
+    merge job reads to decide which of two contradicting items wins, so a
+    wrong or missing one is not cosmetic. Stamping it here removes both
+    failures the same way the S-number and the timestamp are removed from
+    the model's hands.
+    """
     existing = {line.strip() for line in existing_text.splitlines()}
     out = []
     for line in section.splitlines():
         s = line.strip()
-        if s.startswith("- ") and s not in existing:
+        if not s.startswith("- "):
+            continue
+        s = f"- [{date}] {DATE_PREFIX_RE.sub('', s).strip()}"
+        if s not in existing and s not in out:
             out.append(s)
     return out
 
@@ -184,8 +199,11 @@ def main():
                 continue
 
             diary_body = sections.get("DIARY", "")
+            has_lesson = bool(sections.get("PITFALLS")
+                              or sections.get("WORKFLOW"))
+            pending = (plan_entry(cwd, name)
+                       if diary_body or has_lesson else None)
             if diary_body:
-                pending = plan_entry(cwd, name)
                 if pending is None:
                     stats["bad"] += 1
                     log("apply", f"cannot place entry for {name}; discarded")
@@ -195,9 +213,14 @@ def main():
                     log("apply", f"diary S{num} ({pending.mode}) "
                                  f"{pending.date} {name[:8]}")
 
+            # A lesson is dated by the session it came from, not by the day it
+            # was dug up: the backlog is recorded weeks late, and stamping all
+            # of it "today" would make every old item outrank the new ones.
+            date = pending.date if pending else f"{local_now():%Y-%m-%d}"
             for path, key in ((pitfalls_path, "PITFALLS"),
                               (workflow_path, "WORKFLOW")):
-                items = bullets_only(sections.get(key, ""), read_text(path))
+                items = knowledge_bullets(sections.get(key, ""),
+                                          read_text(path), date)
                 if items:
                     old = read_text(path).rstrip()
                     body = "\n".join(items)

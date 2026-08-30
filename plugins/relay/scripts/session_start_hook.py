@@ -7,8 +7,9 @@ context):
 2. When transcripts are still unrecorded, print the procedure that records
    them. Recording runs as subagents of this session rather than a detached
    headless `claude`, so it works in environments where the CLI is not
-   available at all. The long job bodies live in files and only their paths
-   are printed, keeping the main session's context clear of them.
+   available at all. The long job bodies live in files; what is printed is
+   the short prompt that points a subagent at one, keeping the main session's
+   context clear of the bodies themselves.
 
 Runs only on startup/clear; silent when there is nothing to say.
 """
@@ -22,7 +23,6 @@ import relay_prompts
 from relay_common import (
     DROPPED_HEADING,
     MOVE_HEADING,
-    PRUNE_LINES,
     all_entries,
     force_utf8,
     in_scope,
@@ -30,7 +30,6 @@ from relay_common import (
     is_disabled,
     jobs_dir,
     knowledge_path,
-    local_now,
     log,
     read_hook_input,
     read_text,
@@ -105,16 +104,24 @@ def write_jobs(cwd, pending, here):
 
     pitfalls = read_text(knowledge_path(cwd, "pitfalls.md")).strip() or "(empty)"
     workflow = read_text(knowledge_path(cwd, "workflow.md")).strip() or "(empty)"
-    today = f"{local_now():%Y-%m-%d}"
+    project = pathlib.Path(cwd).as_posix()
 
+    # The call the session will make is written out here rather than described:
+    # the classifier scores that call, and a prompt the session composed from a
+    # path plus a sentence of guidance is the shape that got refused.
     lines = []
-    for p in pending:
+    for i, p in enumerate(pending, 1):
         job = jobs / f"{p.sid}.md"
         out = inbox / f"{p.sid}.txt"
         job.write_text(relay_prompts.RECORD.format(
             out=out.as_posix(), transcript=p.path.as_posix(),
-            pitfalls=pitfalls, workflow=workflow, date=today), encoding="utf-8")
-        lines.append(f"   - `{job.as_posix()}`  （{p.date} のセッション {p.sid8}）")
+            pitfalls=pitfalls, workflow=workflow), encoding="utf-8")
+        lines.append(relay_prompts.CALL_BLOCK.format(
+            title=f"ジョブ {i}/{len(pending)}: {p.date} のセッション {p.sid8}",
+            desc="セッション記録テキストの作成",
+            body=relay_prompts.CALL_RECORD.format(
+                project=project, job=job.as_posix(),
+                transcript=p.path.as_posix(), out=out.as_posix())))
 
     diary_paths = "\n".join(
         f"  - {(pathlib.Path(cwd) / 'diary' / (d + '.md')).as_posix()}"
@@ -133,12 +140,20 @@ def write_jobs(cwd, pending, here):
     prune = write_prune_job(cwd)
 
     apply_cmd = 'python "{}" --cwd "{}"'.format(
-        (here / "relay_apply.py").as_posix(), pathlib.Path(cwd).as_posix())
+        (here / "relay_apply.py").as_posix(), project)
     return relay_prompts.TODO.format(
         n=len(pending), model=os.environ.get("RELAY_MODEL", DEFAULT_MODEL),
-        jobs="\n".join(lines), apply=apply_cmd,
-        overwrite_job=overwrite.as_posix(), prune_job=prune.as_posix(),
-        limit=PRUNE_LINES)
+        jobs="".join(lines), apply=apply_cmd,
+        overwrite_call=relay_prompts.CALL_BLOCK.format(
+            title="現在地のジョブ", desc="現在地テキストの作成",
+            body=relay_prompts.CALL_OVERWRITE.format(
+                project=project, job=overwrite.as_posix(),
+                out=(inbox / "overwrite.txt").as_posix())),
+        prune_call=relay_prompts.CALL_BLOCK.format(
+            title="ナレッジ統合のジョブ", desc="ナレッジ統合テキストの作成",
+            body=relay_prompts.CALL_MERGE.format(
+                project=project, job=prune.as_posix(),
+                out=(inbox / "prune.txt").as_posix())))
 
 
 def main():

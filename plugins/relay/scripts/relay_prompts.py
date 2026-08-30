@@ -51,17 +51,22 @@ mistakes（なぜ誤った判断をしたか）の根拠に使ってよい。空
 ### handoff
 - 次のセッションに要ること: 未完了の作業・保留中の確認・次のアクション
 ===PITFALLS===
-- [{date}] 新しい技術的な罠と回避策（命令形・1項目1事実）
+- 新しい技術的な罠と回避策（命令形・1項目1事実）
 ===WORKFLOW===
-- [{date}] このユーザーとの進め方について新しく学んだこと（命令形・1項目1事実）
+- このユーザーとの進め方について新しく学んだこと（命令形・1項目1事実）
 ===END===
 
 **4つの区切り行は、節が空でも必ず全部書くこと。**
 
-PITFALLS / WORKFLOW の規則（該当が無ければ節を空にする）:
-- このセッションで実際に起きた失敗・手戻り・ユーザーの訂正から生まれた教訓だけ
+PITFALLS / WORKFLOW の規則:
+- **この2節は空のまま終わるのが普通です。**該当が無ければ空にする
+- 書くのは、このセッションで実際に起きた失敗・手戻り・ユーザーの訂正から生まれた教訓だけ
 - コード・CLAUDE.md・adr.md・git 履歴から導けることは書かない
-- 上の既存項目と同じことを言うものは書かない
+- **上の既存項目と同じ主題のものは、言い回しを変えても書かない。**書く前に既存項目を\
+1つずつ見て、主題が重なるものが1つでもあれば、その項目は落とす（例:「露出した API キーは \
+transcript にそのまま残る」は、既存の「キーを失効させるだけでは不十分。transcript に記録が\
+残る」と同じ主題なので書かない）
+- **行頭に `[日付]` を書かないこと。**日付は Python が付けます
 
 **`## S1 ...` のような見出し行は書かないこと。**時刻も S 番号も Python が付けます。
 
@@ -158,6 +163,61 @@ Write ツールで次のファイルに書き出してください。
 「一度きりの事情で、もう起こらないもの」。**迷ったら挙げない**
 """
 
+# --- how the session calls a job ------------------------------------------
+#
+# The Task call is itself what auto mode's classifier scores, and "read this
+# file and do what it says" describes nothing it can see. Measured over the
+# real logs: 7 of 17 relay subagent calls were refused with `Blocked by
+# classifier`, and the shape that finally got through — after the same job
+# had been refused twice — leads with the goal, numbers the steps, names the
+# tool each step uses, and names the single file that gets written. These
+# templates are that shape. The hook fills them in and prints them verbatim,
+# so the session pastes a prompt rather than composing one.
+
+CALL_RECORD = """\
+プロジェクト `{project}` の作業記録を1件つくる作業です。
+
+手順:
+1. 指示書 `{job}` を Read で読む。
+2. 指示書に書かれたとおりに作業する。内容は「過去のセッションの記録ファイル \
+`{transcript}` を Read で読み、done / decisions / mistakes / handoff の4節からなる\
+要約テキストにまとめ、`{out}` へ Write で1ファイルだけ書き出す」というものです。
+
+制約: 書き込むのは `{out}` の1本だけ。`diary/` `knowledge/` を含む他のファイルは\
+読むだけで、変更しないでください。"""
+
+CALL_OVERWRITE = """\
+プロジェクト `{project}` の「現在地」ノートを更新する作業です。
+
+手順:
+1. 指示書 `{job}` を Read で読む。
+2. 指示書に書かれたとおりに作業する。内容は「指示書が挙げている `diary/` の日記と \
+`knowledge/` のファイルを Read で読み、いまの現在地をまとめたテキストを組み立て、\
+`{out}` へ Write で1ファイルだけ書き出す」というものです。
+
+制約: 書き込むのは `{out}` の1本だけ。`diary/` `knowledge/` を含む他のファイルは\
+読むだけで、変更しないでください。"""
+
+CALL_MERGE = """\
+プロジェクト `{project}` のナレッジ2ファイルを1つにまとめ直す作業です。
+
+手順:
+1. 指示書 `{job}` を Read で読む。
+2. 指示書に書かれたとおりに作業する。内容は「指示書に貼ってある pitfalls.md と \
+workflow.md の本文を読み、重複を1行にまとめた全文を組み立て、`{out}` へ Write で\
+1ファイルだけ書き出す」というものです。
+
+制約: 書き込むのは `{out}` の1本だけ。`knowledge/` の実ファイルは変更しないでください。"""
+
+# One job as the notice shows it: a header naming the Task description, then
+# the prompt between two markers, so "paste what is between them" is an
+# instruction with no room left to abbreviate.
+CALL_BLOCK = """
+--- {title}（`description` は `{desc}`）ここから ---
+{body}
+--- ここまで ---
+"""
+
 # --- what SessionStart prints ---------------------------------------------
 
 PREAMBLE = """# relay: 前セッションからの引き継ぎ
@@ -180,29 +240,32 @@ TODO = """
 
 **ユーザーへの最初の応答より前に**、次の手順で記録を済ませること。手順の外のことはしない。
 
-1. 次のジョブを Task ツールで実行する（サブエージェントの種類は `general-purpose`、\
+1. 下のジョブを Task ツールで実行する（サブエージェントの種類は `general-purpose`、\
 モデルは `{model}`）。**複数あるときは全部を同じメッセージでまとめて呼ぶこと**——\
-互いに独立なので並行して構わない。**渡すプロンプトは次の2文でよい**（ジョブ本文を\
-ここに展開しないこと）:
+互いに独立なので並行して構わない。
 
-   「<ジョブのパス> を読み、書かれた指示に従え。指示書の内容は、transcript を1本読んで\
-要約テキストを1ファイルに Write するものです。」
-
-   **2文目を省かないこと。**何をするか書かれていないプロンプトは、auto mode の\
-分類器に拒否されることがある（実測）。
+   **`prompt` には「ここから」と「ここまで」に挟まれた本文をそのまま渡すこと。**\
+要約・省略・言い換えをしない。何をどのファイルに書くのかが読み取れないプロンプトは、\
+auto mode の分類器に `Blocked by classifier` で拒否される（実測）。
 {jobs}
-2. 全部終わったら次を1回実行する。
+2. 全部終わったら次の1行を実行する。
 
    `{apply}`
 
+   **この1行を、そのまま1つのコマンドとして実行すること。**`cd` を前に付けない・\
+`&&` や `;` で他のコマンドとつながない・`2>&1` などを足さない。つないだ形も分類器に\
+拒否される（実測）。作業ディレクトリは `--cwd` で渡してあるので `cd` は要らない。
+
    `diary=<件数> ... merge_due=<yes|no>` の1行が出る。
-3. その `diary` が 0 でなければ、`{overwrite_job}` を手順1と同じやり方で1回実行し、\
-再び手順2のコマンドを実行する。**2文目は「指示書の内容は、日記と knowledge を読んで\
-現在地のテキストを1ファイルに Write するものです」に差し替える。**
-4. 手順3で出た `merge_due` が `yes` なら、`{prune_job}` を同じやり方で1回実行し、\
-再び手順2のコマンドを実行する。**2文目は「指示書の内容は、knowledge の2ファイルを読んで\
-統合したテキストを1ファイルに Write するものです」に差し替える。**行数は自分で数えないこと\
-（`merge_due` が発火条件のすべてです）。
+3. その `diary` が 0 でなければ、次のジョブを手順1と同じやり方で1回実行し、\
+再び手順2のコマンドを実行する。
+{overwrite_call}
+4. 手順3で出た `merge_due` が `yes` なら、次のジョブを同じやり方で1回実行し、\
+再び手順2のコマンドを実行する。行数は自分で数えないこと（`merge_due` が発火条件のすべてです）。
+{prune_call}
+**`Blocked by classifier` で拒否されたら、同じ呼び出しを繰り返さないこと。**残りのジョブを\
+進め、最後に「relay: <件数>件は分類器に拒否されたため記録できませんでした」と1行で伝える。\
+拒否されたセッションは未記録のまま残り、次の起動でまた候補に上がるので、記録は失われない。
 
 終わったら「relay: 記録しました」と1行だけ添えて、本来の作業に移ること。
 """

@@ -553,6 +553,112 @@ class TestPruneCannotEraseNewBullets(PipelineCase):
                          "- [2026-01-01] 統合した罠\n")
 
 
+class TestTheCallTheSessionMakes(PipelineCase):
+    """Feature: 分類器に通る呼び出し"""
+
+    def setUp(self):
+        super().setUp()
+        self.make_transcript(SID, dt(2026, 8, 27, 19, 11),
+                             dt(2026, 8, 27, 22, 30), mtime=time.time() - 7200)
+
+    def block(self, notice, n=1):
+        """The nth prompt the notice hands over, between its two markers."""
+        return notice.split("ここから ---")[n].split("--- ここまで")[0]
+
+    def test_the_prompt_is_printed_whole_instead_of_described(self):
+        """呼び出しそのものが分類器の採点対象なので、本文まで書き出す。
+
+        実測（permlog.jsonl の DENY と transcript の突き合わせ）: relay の
+        サブエージェント呼び出し17回中7回が `Blocked by classifier`。
+        「<パス> を読み、指示に従え」＋説明1文の形は2回連続で拒否され、
+        目的から始めて手順に番号を振り、各手順の道具と書き先1本を名指しした
+        形で通った。
+        """
+        notice = self.start_hook()
+        body = self.block(notice)
+        self.assertIn("手順:", body)
+        self.assertIn("を Read で読む", body)
+        self.assertIn("Write で1ファイルだけ書き出す", body)
+        self.assertIn("そのまま渡すこと", notice)
+        # 記録1本＋現在地＋統合。パスだけ並べた形に戻ると数が減る。
+        self.assertEqual(notice.count("ここから ---"), 3)
+
+    def test_the_call_names_the_job_the_transcript_and_the_one_file_written(self):
+        body = self.block(self.start_hook())
+        self.assertIn(f"{SID}.md", body)       # 指示書
+        self.assertIn(f"{SID}.jsonl", body)    # 読む対象
+        self.assertIn(f"{SID}.txt", body)      # 書き先。これ1本だけ
+
+    def test_the_job_body_still_stays_out_of_the_notice(self):
+        self.assertNotIn("===DIARY===", self.start_hook())
+
+    def test_the_apply_command_is_one_command_with_nothing_chained_to_it(self):
+        """`cd ... && python ...` も実測で1回拒否され、`cd` を外して通った。"""
+        notice = self.start_hook()
+        line = next(l for l in notice.splitlines() if "relay_apply.py" in l)
+        self.assertNotIn("cd ", line)
+        self.assertNotIn("&&", line)
+        self.assertIn("--cwd", line)
+        self.assertIn("`cd` を前に付けない", notice)
+
+    def test_a_refused_job_is_left_pending_instead_of_being_repeated(self):
+        notice = self.start_hook()
+        self.assertIn("同じ呼び出しを繰り返さないこと", notice)
+        # 拒否されても記録は失われない: 何も書かなければ次の起動でまた候補になる。
+        self.assertEqual([p.sid for p in relay_detect.pending_sessions(self.cwd)],
+                         [SID])
+
+    def test_the_overwrite_and_merge_calls_are_printed_the_same_way(self):
+        notice = self.start_hook()
+        self.assertIn("現在地テキストの作成", notice)
+        self.assertIn("ナレッジ統合テキストの作成", notice)
+        self.assertIn("overwrite.md", self.block(notice, 2))
+        self.assertIn("prune.md", self.block(notice, 3))
+
+
+class TestKnowledgeDatesComeFromPython(PipelineCase):
+    """Feature: ナレッジ項目の日付"""
+
+    def lesson(self, line, start=dt(2026, 8, 27, 19, 11)):
+        self.make_transcript(SID, start, start + datetime.timedelta(hours=1),
+                             mtime=time.time() - 7200)
+        self.put_inbox(SID, f"===DIARY===\n### done\n- x\n===PITFALLS===\n"
+                            f"{line}\n===WORKFLOW===\n===END===\n")
+        self.apply()
+        return self.read_knowledge("pitfalls.md")
+
+    def test_an_item_written_without_a_date_still_gets_one(self):
+        """実測: workflow.md に足された3行のうち1行は日付が丸ごと無かった。"""
+        self.assertIn("- [2026-08-27] 日付の無い学び",
+                      self.lesson("- 日付の無い学び"))
+
+    def test_a_date_the_model_chose_itself_is_replaced(self):
+        got = self.lesson("- [2020-01-01] 別の日付を書いた学び")
+        self.assertIn("- [2026-08-27] 別の日付を書いた学び", got)
+        self.assertNotIn("2020-01-01", got)
+
+    def test_an_old_session_is_not_stamped_with_the_day_it_was_dug_up(self):
+        """遡り記録では「掘った日」で刻むと古い知見が全部いちばん新しくなる。"""
+        got = self.lesson("- 遡って掘り出した学び", start=dt(2026, 1, 5, 9, 0))
+        self.assertIn("- [2026-01-05] 遡って掘り出した学び", got)
+        self.assertNotIn(f"{relay_common.local_now():%Y-%m-%d}", got)
+
+    def test_a_leading_bracket_that_is_not_a_date_is_left_alone(self):
+        self.assertIn("- [2026-08-27] [進行中] 途中の話",
+                      self.lesson("- [進行中] 途中の話"))
+
+    def test_the_job_body_needs_only_what_the_hook_hands_it(self):
+        """`{date}` を書き戻すと hook の format が KeyError で黙って落ちる。"""
+        relay_prompts.RECORD.format(out="o", transcript="t",
+                                    pitfalls="p", workflow="w")
+
+    def test_the_job_says_an_empty_section_is_the_normal_outcome(self):
+        """重複を入口で止める唯一の手段がこの2節の書き方になった。"""
+        self.assertIn("空のまま終わるのが普通です", relay_prompts.RECORD)
+        self.assertIn("言い回しを変えても書かない", relay_prompts.RECORD)
+        self.assertIn("日付は Python が付けます", relay_prompts.RECORD)
+
+
 class TestStopHook(PipelineCase):
     """Feature: Stop hook（記録の取りこぼしの再促し）"""
 

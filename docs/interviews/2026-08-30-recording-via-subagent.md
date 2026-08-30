@@ -384,6 +384,57 @@ Feature: Stop hook（記録の取りこぼしの再促し）
   Scenario: 30分クールダウン中は黙る / relay 対象外では干渉しない
     Given 10分前に促した記録がある、または RELAY_DISABLED=1
     Then 何も出力しない
+
+# 以下は人間プローブ（段2c）で見つかった欠陥から足したもの。インタビューの
+# 場では出ていない——auto mode の分類器も、記録係の日付の逸脱も、実機で
+# 動かすまで見えなかった。
+
+Feature: 分類器に通る呼び出し
+  Scenario: 呼び出し文は説明ではなく完成形で出る
+    Given 未記録の transcript が1本ある
+    Then 「ここから」と「ここまで」に挟まれた本文が3つ出る（記録・現在地・統合）
+    And 本文には「手順:」「を Read で読む」「Write で1ファイルだけ書き出す」がある
+
+  Scenario: 呼び出し文が指示書・読む対象・書き先を名指しする
+    Then 記録ジョブの本文に <sid>.md と <sid>.jsonl と <sid>.txt が含まれる
+
+  Scenario: ジョブ本文は注意書きに展開されない
+    Then 注意書きに ===DIARY=== は含まれない
+
+  Scenario: apply は1行のコマンドで、何も連結しない
+    Then relay_apply.py の行に "cd " も "&&" も無く、--cwd がある
+    And 注意書きに「`cd` を前に付けない」がある
+
+  Scenario: 拒否されたジョブは再送せず次の起動に回す
+    Then 注意書きに「同じ呼び出しを繰り返さないこと」がある
+    And 記録しなければ、そのセッションは次の検知でも候補に残る
+
+  Scenario: 現在地と統合の呼び出しも同じ形で出る
+    Then overwrite.md と prune.md の本文がそれぞれ1つずつ出る
+
+Feature: ナレッジ項目の日付
+  Scenario: 日付を書かずに返された項目にも日付が付く
+    Given ===PITFALLS=== が "- 日付の無い学び" だけを返した
+    Then pitfalls.md に "- [<セッションの日付>] 日付の無い学び" が入る
+
+  Scenario: モデルが自分で選んだ日付は置き換わる
+    Given 項目が "- [2020-01-01] ..." で返った
+    Then 日付はセッション自身の日付になり、2020-01-01 は残らない
+
+  Scenario: 遡って記録した分は「掘った日」で刻まない
+    Given 2026-01-05 に走ったセッションを今日記録する
+    Then その項目の日付は 2026-01-05 である
+
+  Scenario: 日付でない角括弧は消さない
+    Given 項目が "- [進行中] 途中の話" で返った
+    Then "- [<日付>] [進行中] 途中の話" になる
+
+  Scenario: ジョブ本文は hook が渡す材料だけで組み立つ
+    Then RECORD.format(out, transcript, pitfalls, workflow) が KeyError にならない
+
+  Scenario: 空の節が普通だと本文に書いてある
+    Then RECORD に「空のまま終わるのが普通です」「言い回しを変えても書かない」
+         「日付は Python が付けます」がある
 ```
 
 ## 技術選定
