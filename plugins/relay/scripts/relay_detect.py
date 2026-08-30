@@ -2,9 +2,9 @@
 
 There is no ledger. A transcript is already handled exactly when the diary
 holds an entry for it whose end time is not older than the transcript's last
-timestamp, so the diary is the only state this reads. SessionStart and the
-Stop hook both call pending_sessions() so they can never disagree about what
-is outstanding.
+timestamp, or when it ended before relay was adopted here (see
+session_epoch). SessionStart and the Stop hook both call pending_sessions()
+so they can never disagree about what is outstanding.
 """
 import datetime
 import os
@@ -22,6 +22,7 @@ from relay_common import (
     floor_minute,
     local_now,
     log,
+    session_epoch,
     session_span,
     transcripts_dir,
 )
@@ -98,6 +99,11 @@ def pending_sessions(cwd, now=None, limit=MAX_JOBS):
     step here and only the surviving candidates pay for it.
     """
     now = local_now() if now is None else now
+    # Drawn before anything can return early. A project whose transcripts
+    # directory does not exist yet is a project relay is present for from its
+    # very first session, and that session must not be written off as backlog
+    # by a line drawn later.
+    epoch = session_epoch(cwd, now)
     tdir = transcripts_dir(cwd)
     if not tdir.is_dir():
         return []
@@ -107,6 +113,7 @@ def pending_sessions(cwd, now=None, limit=MAX_JOBS):
     min_msgs = int(os.environ.get("RELAY_MIN_USER_MSGS", DEFAULT_MIN_USER_MSGS))
 
     candidates = []
+    before_epoch = 0
     for path in tdir.glob("*.jsonl"):
         sid = path.stem
         sid8 = sid[:8]
@@ -114,6 +121,13 @@ def pending_sessions(cwd, now=None, limit=MAX_JOBS):
         if span is None:
             continue
         start, end = span
+        # Compared against the end, never the start: a session still running
+        # when relay was adopted keeps growing past the line and is recorded
+        # normally, and so is an old one that gets resumed later. Only a
+        # transcript that had already stopped before adoption is written off.
+        if epoch is not None and end <= epoch:
+            before_epoch += 1
+            continue
         if not _ended(cwd, sid, path, end, now):
             continue
         if sid8 in collided:
@@ -133,6 +147,10 @@ def pending_sessions(cwd, now=None, limit=MAX_JOBS):
         else:
             mode = "replace"
         candidates.append(Pending(path, sid, start, end, mode, entry))
+
+    if before_epoch:
+        log("detect", f"{before_epoch} transcript(s) ended before the epoch "
+                      f"({epoch:%Y-%m-%d %H:%M}); treated as recorded")
 
     candidates.sort(key=lambda c: c.end, reverse=True)
 

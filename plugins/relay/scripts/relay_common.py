@@ -12,6 +12,7 @@ import os
 import pathlib
 import re
 import sys
+import time
 
 # On Windows, an IANA-style TZ (e.g. "Asia/Tokyo" set by Git Bash) is not
 # understood by the C runtime and silently degrades localtime to UTC.
@@ -37,6 +38,14 @@ RESUME_CUTOFF_DAYS = 15
 # Jobs handed to the model in one session start. The rest are caught next
 # time; candidates shrink monotonically, so nothing is stranded.
 MAX_JOBS = 3
+# How long a job file counts as "possibly still running". The recording
+# subagents finish invisibly to Python, so the Stop hook cannot tell an
+# in-flight job from one that was never started; the mtime of the job file
+# is the only evidence either way. Measured runs take 2-4 minutes, and a
+# 165 MB transcript takes longer, so this is deliberately generous: a nudge
+# that arrives too early costs a duplicated job, and duplicated jobs are
+# harmless (upsert_entry replaces by id) but not free.
+JOB_GRACE_SECS = 15 * 60
 DEFAULT_MIN_USER_MSGS = 3
 # knowledge/ files are meant to stay small; past this the pruning job runs.
 PRUNE_LINES = 80
@@ -173,6 +182,103 @@ def ended_dir(cwd):
 def jobs_dir(cwd):
     """Instruction files the session's subagents are pointed at."""
     return relay_home() / "jobs" / sanitize_cwd(cwd)
+
+
+def epoch_path(cwd):
+    """Where this project's cutoff is remembered, as editable plain text."""
+    return relay_home() / "epoch" / sanitize_cwd(cwd)
+
+
+# RELAY_EPOCH values meaning "no cutoff at all".
+EPOCH_OFF = ("", "0", "no", "none", "off")
+
+
+def parse_epoch(text):
+    """An ISO date or date-time -> naive local datetime, or None."""
+    try:
+        stamp = datetime.datetime.fromisoformat(text.strip())
+    except (AttributeError, ValueError):
+        return None
+    if stamp.tzinfo is not None:
+        stamp = (stamp.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+                 + local_offset())
+    return stamp
+
+
+def session_epoch(cwd, now=None):
+    """The instant before which transcripts already count as recorded.
+
+    relay is adopted into projects that already hold weeks of transcripts,
+    and without a cutoff every one of them is offered for recording. The
+    measured cost when v0.5.0 changed the heading format and stopped
+    recognising what v0.3.0 had written: 86 sessions, ~394 MB, three of them
+    re-summarised on every single startup, with current.md dragged backwards
+    each time. The cutoff is what makes adopting relay free.
+
+    Written once, on first sight of the project, and never moved afterwards.
+    A cutoff that advanced on every update would be a retention window, and
+    the window is the one shape this design already rejected: with a line
+    that moves, a transcript inside it today falls outside it tomorrow and
+    is dropped with nothing recording that it existed. A line drawn once has
+    no outside to fall into — once a session is newer than the epoch it
+    stays newer forever.
+
+    Returns None for "no cutoff", which is also what a hand-broken file
+    gives. The file is plain text precisely so a human can move the line by
+    editing it, and a typo there must not silently erase a real backlog:
+    failing open floods the next startup with candidates, which is loud and
+    recoverable, while failing closed loses the summaries leaving no trace
+    that anything was skipped.
+    """
+    override = os.environ.get("RELAY_EPOCH")
+    if override is not None:
+        if override.strip().lower() in EPOCH_OFF:
+            return None
+        stamp = parse_epoch(override)
+        if stamp is None:
+            log("epoch", f"RELAY_EPOCH={override!r} is not a date; no cutoff")
+        return stamp
+
+    path = epoch_path(cwd)
+    text = read_text(path).strip()
+    if text:
+        stamp = parse_epoch(text)
+        if stamp is None:
+            log("epoch", f"{path} holds {text!r}, which is not a date; "
+                         "no cutoff applied")
+        return stamp
+
+    stamp = local_now() if now is None else now
+    try:
+        write_atomic(path, stamp.isoformat(timespec="seconds") + "\n")
+    except OSError as e:
+        log("epoch", f"could not write {path}: {e!r}; no cutoff applied")
+        return None
+    log("epoch", f"set to {stamp:%Y-%m-%d %H:%M} for {cwd}: "
+                 "transcripts that ended earlier count as recorded")
+    return stamp
+
+
+def jobs_in_flight(cwd, sids, now=None):
+    """Which of `sids` have a job file young enough to still be running.
+
+    The recording subagents are invisible to Python: they finish without
+    telling anyone, and the file they write lands in the inbox only once
+    they are done, so "no inbox file" covers not-started, running and
+    already-applied alike. The age of the job file is the one piece of
+    evidence there is, and it is what keeps the Stop hook from shouting
+    "3 unrecorded" at a session that is recording those three right now.
+    """
+    now = time.time() if now is None else now
+    jobs = jobs_dir(cwd)
+    out = set()
+    for sid in sids:
+        try:
+            if now - os.path.getmtime(jobs / f"{sid}.md") < JOB_GRACE_SECS:
+                out.add(sid)
+        except OSError:
+            pass  # no job file -> nothing was ever handed out for it
+    return out
 
 
 def inbox_dir(cwd):
@@ -442,6 +548,25 @@ def parse_diary_file(path):
             entries.append(Entry(path, i, heading, (pos, stop), text[pos:stop],
                                  broken=bool(IDISH_RE.match(heading))))
     return entries
+
+
+# Enough diary to see what just happened, without the volume swinging with
+# how many sessions a given day happened to hold.
+INJECT_ENTRIES = 5
+
+
+def recent_entries(cwd, limit=INJECT_ENTRIES):
+    """The newest entries across all diary files, oldest of them first.
+
+    Counted as entries rather than days: a day holding four sessions would
+    otherwise inject four times as much as a day holding one. Both the
+    injection and the overwrite job read from here, so "the newest diary"
+    means the same thing to the reader and to the job that writes current.md.
+    """
+    entries = [e for e in all_entries(cwd)
+               if e.heading.strip() not in (DROPPED_HEADING, MOVE_HEADING)]
+    entries.sort(key=lambda e: e.sort_key())
+    return entries[-limit:]
 
 
 def diary_files(cwd):

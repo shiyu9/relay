@@ -82,7 +82,7 @@ OVERWRITE = """あなたは relay の「現在地」係です。**transcript は
 
 **このファイル以外を一切変更してはいけません。**
 
-今回書かれた日記（この中の `### handoff` と `### decisions` が主な材料です）:
+材料の日記（今回記録した分と、直近のもの。`### handoff` と `### decisions` が主な材料です）:
 {diary_paths}
 
 現在の knowledge/current.md:
@@ -106,6 +106,7 @@ OVERWRITE = """あなたは relay の「現在地」係です。**transcript は
 **CURRENT の規則:**
 - 「**いまどこにいて、次に何をするか**」を書く1つの節。**未完了の網羅的な一覧ではない**
 - 上の current.md を出発点に更新する。今回のセッションが触れていない内容は残す
+- **現在地を過去へ戻さないこと。**古いセッションを遡って記録した回は、材料に何週間も前の handoff が混ざります。日記のファイル名は日付なので、**一番新しい日付のものが「いま」に一番近い**。古い handoff を根拠に、既に済んだことを「未完了」と書き直さないこと
 - **行数の上限は無い。**現在地を伝えるのに必要なだけ書いてよい
 - この節は current.md を**丸ごと置き換える**。書かなかったものは失われる
 - 節を空にすると既存の current.md がそのまま維持される。空にしてよいのは\
@@ -270,10 +271,15 @@ auto mode の分類器に `Blocked by classifier` で拒否される（実測）
 終わったら「relay: 記録しました」と1行だけ添えて、本来の作業に移ること。
 """
 
+# The procedure follows this line, rebuilt for the sessions outstanding right
+# now. Pointing back at the one printed at startup was wrong twice over: it
+# names the transcripts that were pending at startup (already recorded, by
+# now, if the session did its job), and it may have fallen out of context
+# entirely by the time this fires.
 STOP_NUDGE = (
-    "relay: 未記録のセッションが {n} 件残っています。セッション開始時に注入された "
-    "「relay: 未記録のセッションがある」の手順を実行してください（ジョブは "
-    "{jobs_dir} にあります）。記録が済むまで、この促しは30分おきに出ます。"
+    "relay: 未記録のセッションが {n} 件残っています。**下の手順をいま実行してください。**"
+    "セッション開始時に注入された手順は対象が古いので使わず、下のものを使うこと。"
+    "記録が済むまで、この促しは30分おきに出ます。"
     "実行したあとの締めの発言は、直前にユーザーへ返した本文を置き換えないこと。"
-    "1〜2行の追記に留めてください。"
+    "1〜2行の追記に留めてください。\n"
 )

@@ -47,6 +47,22 @@ class RelayCase(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         self.addCleanup(self._tmp.cleanup)
+        # A project relay has already been running in. Without this every
+        # fixture transcript would sit before the epoch the first call writes,
+        # and the whole suite would go green while detecting nothing at all.
+        self.set_epoch(dt(2000, 1, 1))
+
+    def set_epoch(self, when):
+        """Pin the cutoff. `when=None` removes it, back to an unseen project."""
+        p = relay_common.epoch_path(self.cwd)
+        if when is None:
+            p.unlink(missing_ok=True)
+            return p
+        relay_common.write_atomic(p, when.isoformat() + "\n")
+        return p
+
+    def read_epoch(self):
+        return relay_common.read_text(relay_common.epoch_path(self.cwd)).strip()
 
     # --- transcripts ------------------------------------------------------
 

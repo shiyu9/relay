@@ -7,7 +7,22 @@ notices. This hook is the backstop, and it asks the same question detection
 does, so the two can never disagree about what is outstanding.
 
 It stays quiet unless there is something to record: Stop fires on every turn,
-and a nudge that repeats itself is worse than no nudge at all.
+and a nudge that repeats itself is worse than no nudge at all. Two things
+have to be true before it speaks, beyond the cooldown:
+
+- the work is not already under way. Recording subagents run and finish
+  without telling Python anything, so a session that dispatched three jobs a
+  minute ago looks exactly like one that ignored the procedure. The age of
+  the job file is the only evidence there is, and a fresh one buys silence.
+- the jobs it points at describe the sessions that are actually outstanding.
+  Startup wrote jobs for the backlog as it stood at startup; an hour later
+  those may all be in the diary. So the nudge rebuilds them and carries the
+  procedure itself, rather than sending the reader to a directory whose
+  contents no longer mean what the message says they mean.
+
+The order of those two is load-bearing: rebuilding the jobs touches their
+mtimes, so the in-flight question has to be answered first or the hook keeps
+resetting its own grace period.
 
 Output: {"decision": "block", "reason": ...} when nudging, otherwise nothing.
 """
@@ -23,11 +38,12 @@ from relay_common import (
     hook_state_dir,
     in_scope,
     is_disabled,
-    jobs_dir,
+    jobs_in_flight,
     log,
     sanitize_cwd,
 )
 from relay_detect import pending_sessions
+from relay_jobs import write_jobs
 
 STATE_TTL_SECONDS = 7 * 24 * 3600
 # Per project, not per session: remote sessions get a fresh id each turn, so
@@ -77,11 +93,23 @@ def main():
     if not cwd or is_disabled() or not in_scope(cwd):
         return
 
+    now = time.time()
     pending = pending_sessions(cwd)
+    # Asked before anything below can write a job file, because writing one
+    # is what makes a session look in-flight.
+    in_flight = jobs_in_flight(cwd, [p.sid for p in pending], now)
+    outstanding = [p for p in pending if p.sid not in in_flight]
+
     state_dir = hook_state_dir()
     state_file = state_dir / f"{sanitize_cwd(cwd)}.json"
-    now = time.time()
-    if not should_nudge(len(pending), _read_last_nudge(state_file), now):
+    last_nudge = _read_last_nudge(state_file)
+    if not should_nudge(len(outstanding), last_nudge, now):
+        # Logged only when the in-flight jobs are the whole reason for the
+        # silence; Stop fires every turn, so an unconditional line here would
+        # bury the log in the ordinary quiet case.
+        if in_flight and should_nudge(len(pending), last_nudge, now):
+            log("stop", f"{len(in_flight)} job(s) still in flight in {cwd}; "
+                        "stayed quiet")
         return
 
     try:
@@ -91,10 +119,12 @@ def main():
     except OSError:
         return  # cannot remember having nudged -> do not nudge
 
-    reason = relay_prompts.STOP_NUDGE.format(
-        n=len(pending), jobs_dir=jobs_dir(cwd).as_posix())
+    # Only the outstanding ones get rebuilt: touching a job that is in flight
+    # would extend its grace period for no reason.
+    notice = write_jobs(cwd, outstanding)
+    reason = relay_prompts.STOP_NUDGE.format(n=len(outstanding)) + notice
     print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
-    log("stop", f"nudged: {len(pending)} unrecorded in {cwd}")
+    log("stop", f"nudged: {len(outstanding)} unrecorded in {cwd}")
 
 
 if __name__ == "__main__":

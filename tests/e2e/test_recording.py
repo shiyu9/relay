@@ -20,6 +20,7 @@ from relay_test_support import RelayCase, dt, utc_text  # noqa: E402
 import relay_apply  # noqa: E402
 import relay_common  # noqa: E402
 import relay_detect  # noqa: E402
+import relay_jobs  # noqa: E402
 import relay_prompts  # noqa: E402
 import relay_stop_hook  # noqa: E402
 import session_end_hook  # noqa: E402
@@ -357,6 +358,17 @@ class TestOverwriteLayers(PipelineCase):
         self.assertIn(relay_common.DROPPED_HEADING, today)
         self.assertIn("2026-08-12 コスト表示を見送り", today)
 
+    def test_the_overwrite_job_sees_the_newest_diary_not_only_this_run(self):
+        self.write_diary("2026-08-29",
+                         "## S1 09:00-10:00 (aaaaaaaa)\n### done\n- 昨日の話\n")
+        self.make_transcript(SID, dt(2026, 8, 10, 9, 0), dt(2026, 8, 10, 11, 30),
+                             mtime=time.time() - 7200)
+        self.start_hook()
+        job = relay_common.read_text(
+            relay_common.jobs_dir(self.cwd) / "overwrite.md")
+        self.assertIn("diary/2026-08-10.md", job)
+        self.assertIn("diary/2026-08-29.md", job)
+
     def test_the_dropped_heading_is_not_injected(self):
         self.write_diary(f"{relay_common.local_now():%Y-%m-%d}",
                          f"{relay_common.DROPPED_HEADING}\n- 落ちた項目\n")
@@ -649,8 +661,9 @@ class TestKnowledgeDatesComeFromPython(PipelineCase):
 
     def test_the_job_body_needs_only_what_the_hook_hands_it(self):
         """`{date}` を書き戻すと hook の format が KeyError で黙って落ちる。"""
-        relay_prompts.RECORD.format(out="o", transcript="t",
-                                    pitfalls="p", workflow="w")
+        body = relay_prompts.RECORD.format(out="o", transcript="t",
+                                           pitfalls="p", workflow="w")
+        self.assertIn("===DIARY===", body)
 
     def test_the_job_says_an_empty_section_is_the_normal_outcome(self):
         """重複を入口で止める唯一の手段がこの2節の書き方になった。"""
@@ -706,6 +719,185 @@ class TestSessionEndMarker(PipelineCase):
             pathlib.Path(session_end_hook.__file__))
         for forbidden in ("subprocess", "Popen", "claude -p", "shutil"):
             self.assertNotIn(forbidden, source)
+
+
+class TestTheAdoptionCutoff(PipelineCase):
+    """Feature: 導入時点の線（epoch）"""
+
+    OLD = (dt(2026, 8, 10, 9, 0), dt(2026, 8, 10, 11, 30))
+
+    def _old_transcript(self, sid=SID):
+        return self.make_transcript(sid, *self.OLD, mtime=time.time() - 7200)
+
+    def _sid8s(self, **kw):
+        return [p.sid8 for p in relay_detect.pending_sessions(self.cwd, **kw)]
+
+    def test_adopting_a_project_offers_none_of_its_backlog(self):
+        self.set_epoch(None)
+        self.write_knowledge("pitfalls.md", "- [2026-08-01] 何かの罠\n")
+        for sid in (SID, OTHER, "3f1c9a20-1111-2222-3333-444455556666"):
+            self.make_transcript(sid, *self.OLD, mtime=time.time() - 7200)
+        out = self.start_hook()
+        self.assertIn("pitfalls.md", out)
+        self.assertNotIn("未記録のセッションが", out)
+        self.assertEqual(self._sid8s(), [])
+        self.assertTrue(self.read_epoch())
+
+    def test_a_transcript_that_ended_before_the_line_is_never_offered(self):
+        self._old_transcript()
+        self.set_epoch(dt(2026, 8, 20))
+        self.assertEqual(self._sid8s(), [])
+
+    def test_a_transcript_that_ended_after_the_line_is_recorded_as_usual(self):
+        self._old_transcript()
+        self.set_epoch(dt(2026, 8, 1))
+        self.assertEqual(self._sid8s(), [SID8])
+
+    def test_the_line_is_drawn_once_and_never_moves(self):
+        self.set_epoch(None)
+        self._sid8s(now=dt(2026, 8, 20, 12, 0))
+        self.assertEqual(self.read_epoch(), "2026-08-20T12:00:00")
+        self._sid8s(now=dt(2026, 9, 30, 12, 0))
+        self.assertEqual(self.read_epoch(), "2026-08-20T12:00:00")
+
+    def test_nothing_can_fall_out_of_the_line_later(self):
+        """The one property a retention window does not have."""
+        self.set_epoch(None)
+        self._sid8s(now=dt(2026, 8, 20, 12, 0))
+        self.make_transcript(SID, dt(2026, 8, 21, 9, 0), dt(2026, 8, 21, 11, 0),
+                             mtime=time.time() - 7200)
+        for much_later in (dt(2026, 8, 22), dt(2026, 12, 31)):
+            self.assertEqual(self._sid8s(now=much_later), [SID8])
+
+    def test_a_session_still_running_when_the_line_was_drawn_is_kept(self):
+        end = relay_common.local_now() - datetime.timedelta(minutes=40)
+        self.set_epoch(end - datetime.timedelta(hours=1))
+        self.make_transcript(SID, end - datetime.timedelta(hours=3), end,
+                             mtime=time.time() - 7200)
+        self.assertEqual(self._sid8s(), [SID8])
+
+    def test_an_old_transcript_that_resumes_comes_back(self):
+        self.set_epoch(dt(2026, 8, 20))
+        self._old_transcript()
+        self.assertEqual(self._sid8s(), [])
+        self.make_transcript(SID, self.OLD[0], dt(2026, 8, 25, 10, 0),
+                             mtime=time.time() - 7200)
+        self.assertEqual(self._sid8s(), [SID8])
+
+    def test_a_broken_line_records_everything_rather_than_nothing(self):
+        self._old_transcript()
+        relay_common.write_atomic(relay_common.epoch_path(self.cwd), "yesterday\n")
+        self.assertEqual(self._sid8s(), [SID8])
+        self.assertEqual(self.read_epoch(), "yesterday")
+
+    def test_the_line_moves_by_editing_the_file(self):
+        self._old_transcript()
+        self.set_epoch(dt(2026, 8, 20))
+        self.assertEqual(self._sid8s(), [])
+        self.set_epoch(dt(2026, 8, 1))
+        self.assertEqual(self._sid8s(), [SID8])
+
+    def test_a_date_with_no_time_is_accepted(self):
+        self._old_transcript()
+        relay_common.write_atomic(relay_common.epoch_path(self.cwd), "2026-08-20\n")
+        self.assertEqual(self._sid8s(), [])
+
+    def test_relay_epoch_off_lifts_the_cutoff_without_touching_the_file(self):
+        self._old_transcript()
+        self.set_epoch(dt(2026, 8, 20))
+        with mock.patch.dict(os.environ, {"RELAY_EPOCH": "none"}):
+            self.assertEqual(self._sid8s(), [SID8])
+        self.assertEqual(self.read_epoch(), "2026-08-20T00:00:00")
+
+    def test_relay_epoch_overrides_the_file(self):
+        self._old_transcript()
+        self.set_epoch(dt(2026, 8, 1))
+        with mock.patch.dict(os.environ, {"RELAY_EPOCH": "2026-08-20"}):
+            self.assertEqual(self._sid8s(), [])
+
+    def test_the_stop_hook_reads_the_same_line(self):
+        self._old_transcript()
+        self.set_epoch(dt(2026, 8, 20))
+        self.assertEqual(self.stop_hook(), "")
+
+
+class TestTheNudgePointsAtWorkThatIsLeft(PipelineCase):
+    """Feature: Stop hook が指すジョブ"""
+
+    def _unrecorded(self, sid=SID, day=27):
+        return self.make_transcript(sid, dt(2026, 8, day, 19, 11),
+                                    dt(2026, 8, day, 22, 30),
+                                    mtime=time.time() - 7200)
+
+    def _hand_out(self):
+        """What SessionStart does: jobs for whatever is pending right now."""
+        relay_jobs.write_jobs(self.cwd, relay_detect.pending_sessions(self.cwd))
+
+    def _age(self, sid, secs):
+        p = relay_common.jobs_dir(self.cwd) / f"{sid}.md"
+        when = time.time() - secs
+        os.utime(p, (when, when))
+        return p
+
+    def test_the_nudge_carries_the_procedure_not_a_directory(self):
+        self._unrecorded()
+        reason = json.loads(self.stop_hook())["reason"]
+        self.assertIn(SID8, reason)
+        self.assertIn("relay_apply.py", reason)
+        self.assertIn("--cwd", reason)
+        self.assertNotIn("{jobs_dir}", relay_prompts.STOP_NUDGE)
+
+    def test_the_job_body_still_stays_out_of_the_nudge(self):
+        self._unrecorded()
+        self.assertNotIn("===DIARY===", json.loads(self.stop_hook())["reason"])
+
+    def test_the_rebuilt_jobs_name_what_is_outstanding_now(self):
+        self._unrecorded(SID, day=27)
+        self._unrecorded(OTHER, day=26)
+        self._hand_out()
+        self.record(OTHER)
+        self._age(SID, relay_common.JOB_GRACE_SECS + 60)
+        reason = json.loads(self.stop_hook())["reason"]
+        self.assertIn(SID8, reason)
+        self.assertNotIn(OTHER[:8], reason)
+        self.assertIn("1 件", reason)
+
+    def test_a_job_handed_out_moments_ago_buys_silence(self):
+        self._unrecorded()
+        self._hand_out()
+        self.assertEqual(self.stop_hook(), "")
+
+    def test_three_jobs_in_flight_leave_nothing_to_nudge_about(self):
+        self._unrecorded(SID, day=27)
+        self._unrecorded(OTHER, day=26)
+        self._hand_out()
+        self.assertEqual(self.stop_hook(), "")
+
+    def test_silence_ends_once_the_job_is_older_than_the_grace(self):
+        self._unrecorded()
+        self._hand_out()
+        self._age(SID, relay_common.JOB_GRACE_SECS + 60)
+        self.assertNotEqual(self.stop_hook(), "")
+
+    def test_the_in_flight_question_is_asked_before_the_jobs_are_rebuilt(self):
+        self._unrecorded()
+        self._hand_out()
+        job = self._age(SID, relay_common.JOB_GRACE_SECS + 60)
+        aged = os.path.getmtime(job)
+        self.assertNotEqual(self.stop_hook(), "")
+        self.assertGreater(os.path.getmtime(job), aged)
+
+    def test_a_job_in_flight_is_not_touched_by_a_nudge_about_another(self):
+        self._unrecorded(SID, day=27)
+        self._unrecorded(OTHER, day=26)
+        self._hand_out()
+        fresh = os.path.getmtime(
+            relay_common.jobs_dir(self.cwd) / f"{OTHER}.md")
+        self._age(SID, relay_common.JOB_GRACE_SECS + 60)
+        self.assertNotEqual(self.stop_hook(), "")
+        self.assertEqual(
+            os.path.getmtime(relay_common.jobs_dir(self.cwd) / f"{OTHER}.md"),
+            fresh)
 
 
 if __name__ == "__main__":

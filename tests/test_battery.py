@@ -353,5 +353,83 @@ class TestScale(ApplyCase):
         self.assertEqual(span, (dt(2026, 8, 27, 19, 11), dt(2026, 8, 27, 22, 30)))
 
 
+# --- 11 the adoption cutoff -----------------------------------------------
+
+class TestAdoptionCutoff(ApplyCase):
+    def _old(self):
+        return self.make_transcript(SID, dt(2026, 8, 10, 9, 0),
+                                    dt(2026, 8, 10, 11, 30), mtime=PAST)
+
+    def _pending(self, **kw):
+        return relay_detect.pending_sessions(self.cwd, **kw)
+
+    def test_exactly_on_the_line_counts_as_before_it(self):
+        self._old()
+        self.set_epoch(dt(2026, 8, 10, 11, 30))
+        self.assertEqual(self._pending(), [])
+
+    def test_one_minute_earlier_and_the_session_is_pending(self):
+        self._old()
+        self.set_epoch(dt(2026, 8, 10, 11, 29))
+        self.assertEqual(len(self._pending()), 1)
+
+    def test_an_empty_file_is_the_same_as_no_file_at_all(self):
+        relay_common.write_atomic(relay_common.epoch_path(self.cwd), "\n")
+        self._pending(now=dt(2026, 8, 20))
+        self.assertEqual(self.read_epoch(), "2026-08-20T00:00:00")
+
+    def test_a_tz_aware_override_lands_on_the_same_instant(self):
+        self._old()
+        utc = dt(2026, 8, 10, 11, 30) - relay_common.local_offset()
+        with mock.patch.dict(os.environ,
+                             {"RELAY_EPOCH": utc.isoformat() + "+00:00"}):
+            self.assertEqual(self._pending(), [])
+
+    def test_an_unwritable_line_leaves_the_backlog_visible(self):
+        self._old()
+        self.set_epoch(None)
+        with mock.patch.object(relay_common, "write_atomic",
+                               side_effect=OSError):
+            self.assertEqual(len(self._pending()), 1)
+
+    def test_repeated_detection_never_moves_the_line(self):
+        self._old()
+        self.set_epoch(dt(2026, 8, 20))
+        for _ in range(3):
+            self._pending()
+        self.assertEqual(self.read_epoch(), "2026-08-20T00:00:00")
+
+    def test_the_line_never_reaches_a_transcript_with_no_span(self):
+        tdir = relay_common.transcripts_dir(self.cwd)
+        tdir.mkdir(parents=True, exist_ok=True)
+        (tdir / f"{SID}.jsonl").write_text("{}\n", encoding="utf-8")
+        self.set_epoch(dt(2026, 8, 20))
+        self.assertEqual(self._pending(), [])
+
+
+class TestInFlightJobs(ApplyCase):
+    def _job(self, sid=SID):
+        jobs = relay_common.jobs_dir(self.cwd)
+        jobs.mkdir(parents=True, exist_ok=True)
+        p = jobs / f"{sid}.md"
+        p.write_text("x", encoding="utf-8")
+        return p
+
+    def test_a_session_with_no_job_file_is_never_in_flight(self):
+        self.assertEqual(relay_common.jobs_in_flight(self.cwd, [SID]), set())
+
+    def test_the_grace_is_exclusive_at_its_own_edge(self):
+        p = self._job()
+        now = time.time()
+        for age, expected in ((relay_common.JOB_GRACE_SECS, set()),
+                              (relay_common.JOB_GRACE_SECS - 1, {SID})):
+            os.utime(p, (now - age, now - age))
+            self.assertEqual(
+                relay_common.jobs_in_flight(self.cwd, [SID], now), expected)
+
+    def test_an_empty_list_asks_nothing_of_the_filesystem(self):
+        self.assertEqual(relay_common.jobs_in_flight(self.cwd, []), set())
+
+
 if __name__ == "__main__":
     unittest.main()

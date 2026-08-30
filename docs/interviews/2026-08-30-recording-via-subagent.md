@@ -435,6 +435,116 @@ Feature: ナレッジ項目の日付
   Scenario: 空の節が普通だと本文に書いてある
     Then RECORD に「空のまま終わるのが普通です」「言い回しを変えても書かない」
          「日付は Python が付けます」がある
+
+Feature: 導入時点の線（epoch）
+  Scenario: 導入したプロジェクトの backlog は1件も出さない
+    Given epoch がまだ無く、終了済みの古い transcript が3本ある
+    When SessionStart が走る
+    Then ナレッジは注入されるが「未記録のセッションが」は出ない
+    And epoch ファイルが書かれている
+
+  Scenario: 線より前に終わった transcript は候補にならない
+    Given epoch が 8/20 で、transcript が 8/10 11:30 に終わっている
+    Then それは記録対象にならない
+
+  Scenario: 線より後に終わった transcript は普段どおり記録される
+    Given epoch が 8/1 で、transcript が 8/10 11:30 に終わっている
+    Then それは記録対象になる
+
+  Scenario: 線は一度だけ引かれ、二度と動かない
+    Given epoch が 8/20 12:00 に引かれた
+    When 9/30 に検知が走る
+    Then epoch は 8/20 12:00 のままである
+
+  Scenario: 一度線を越えたものが後から外へ落ちることはない
+    Given 8/20 に線が引かれ、8/21 に終わったセッションがある
+    When 8/22 と 12/31 に検知が走る
+    Then どちらでもそのセッションは候補に残る
+
+  Scenario: 線を引いた時点で走っていたセッションは切り捨てない
+    Given transcript の開始が線より前、終了が線より後
+    Then それは記録対象になる
+
+  Scenario: 線より前の transcript が resume で伸びたら戻ってくる
+    Given epoch が 8/20 で、8/10 に終わった transcript が候補から外れている
+    When 同じ transcript の末尾が 8/25 まで伸びる
+    Then それは記録対象になる
+
+  Scenario: 壊れた線は「全部記録する」に倒す
+    Given epoch ファイルの中身が "yesterday" である
+    Then 古い transcript も記録対象になる
+    And ファイルは黙って書き直されない
+
+  Scenario: 線はファイルを編集して動かせる
+    Given epoch が 8/20 で候補が空である
+    When ファイルを 8/1 に書き換える
+    Then 8/10 の transcript が候補に戻る
+
+  Scenario: 時刻の無い日付だけでも受け付ける
+    Given epoch ファイルの中身が "2026-08-20" である
+    Then 8/10 の transcript は候補にならない
+
+  Scenario: RELAY_EPOCH=none は線を無効にし、ファイルには触れない
+    Given epoch が 8/20 である
+    When RELAY_EPOCH=none で検知する
+    Then 8/10 の transcript が候補になり、ファイルは 8/20 のままである
+
+  Scenario: RELAY_EPOCH はファイルより優先される
+    Given epoch が 8/1 で、RELAY_EPOCH=2026-08-20 が設定されている
+    Then 8/10 の transcript は候補にならない
+
+  Scenario: Stop hook も同じ線を読む
+    Given epoch が 8/20 で、8/10 の transcript がある
+    Then Stop hook は促さない
+
+  Scenario: 線のちょうど上は「前」として扱う
+    Given epoch が transcript の末尾 timestamp と同じ瞬間である
+    Then それは記録対象にならない
+
+  Scenario: タイムゾーン付きの指定は同じ瞬間に落ちる
+    Given RELAY_EPOCH が末尾 timestamp と同じ瞬間を UTC 表記で指している
+    Then それは記録対象にならない
+
+  Scenario: 線を書けなかったら backlog は見えたままにする
+    Given epoch がまだ無く、書き込みが OSError で失敗する
+    Then 古い transcript は候補に残る
+
+Feature: Stop hook が指すジョブ
+  Scenario: 促しはジョブ置き場ではなく手順そのものを載せる
+    Given 未記録のセッションが1件ある
+    Then reason に対象の id8 と relay_apply.py と --cwd がある
+    And STOP_NUDGE に {jobs_dir} という差し込みは無い
+
+  Scenario: ジョブ本文は促しに展開されない
+    Then reason に ===DIARY=== は含まれない
+
+  Scenario: 組み直したジョブは「いま残っているもの」を名指しする
+    Given 起動時に2件分のジョブが書かれ、そのうち1件は記録済みになった
+    And 残りのジョブ指示書は15分より古い
+    Then reason には残った1件の id8 だけがあり、記録済みの id8 は無い
+
+  Scenario: 渡したばかりのジョブは促しを黙らせる
+    Given ジョブ指示書を書いた直後である
+    Then Stop hook は何も出さない
+
+  Scenario: 猶予を過ぎたら促しが戻る
+    Given ジョブ指示書が15分より古い
+    Then Stop hook は促す
+
+  Scenario: in-flight の判定はジョブ組み直しより前に行う
+    Given ジョブ指示書が15分より古い
+    When Stop hook が促す
+    Then 促しは出て、かつそのジョブ指示書は書き直されている
+
+  Scenario: 実行中のジョブは他人の促しで触られない
+    Given 1件が15分より古く、もう1件は書いたばかりである
+    When Stop hook が促す
+    Then 書いたばかりのジョブ指示書の更新時刻は変わらない
+
+Feature: 現在地の材料
+  Scenario: 現在地ジョブは今回の分だけでなく直近の日記も見る
+    Given 8/29 の日記があり、今回記録するのは 8/10 のセッションだけである
+    Then overwrite.md は 8/10 と 8/29 の両方を材料に挙げる
 ```
 
 ## 技術選定
@@ -649,3 +759,67 @@ python "C:/Users/winba/.claude/plugins/cache/rally/rally/0.5.0/scripts/rally_tes
 見出しは分単位・transcript は秒単位なので、丸めを外すと差し替え判定が毎回真になり
 **毎起動で同じセッションを記録し直す**——その一点を突く試験が実際に効いていることを確認して、
 元に戻した（77件 green）。
+
+---
+
+## 追補: v0.6.0（導入時点の線と、Stop hook の2つの隙間）
+
+依頼（2026-08-30 夜・ユーザー直接決定、freetalk-e3 経由）:「プラグイン導入・更新時点より古い
+transcript は記録済み扱いにして記録対象から外す」一括初期化を足す。同時に、同じ節に記録されていた
+既知の隙間3件を同便で扱うかどうかを判断する。**3件とも同便で扱うと判断した**——1と2は Stop hook
+そのものの正しさで epoch とは独立に壊れており、3は epoch で backlog が消えても resume 判定の
+たびに再発する設計の穴だったため。
+
+設計判断は `docs/adr.md` の 2026-08-30 の11項目に記した。要点だけ:
+
+- **線は一度きり。**更新のたびに引き直すと「保持の窓」になり、この設計が明示的に捨てた形に戻る
+- **末尾 timestamp と比べる。**線を跨いで走っていたセッションと、後から resume したものを守る
+- **フェイルオープン。**壊れた線は「全部記録する」に倒す。人が編集する平文だから
+- **判定は Python。**プロンプトには一切置かない
+- **in-flight 判定はジョブ組み直しより前。**順序が逆だと自分で猶予をリセットする
+
+### 標準試験バッテリー適用結果（追補分）
+
+| 区分 | 追加した観点 |
+|---|---|
+| 境界 | 線のちょうど上（前として扱う）・1分手前・猶予15分のちょうど端 |
+| 異常系 | 壊れた epoch ファイル・空のファイル・span の無い transcript・空のリスト |
+| 環境 | `RELAY_EPOCH` による上書きと無効化・タイムゾーン付き指定の換算 |
+| 耐久性 | epoch が書けない（OSError）ときに backlog を見せたままにする |
+| 冪等 | 検知を3回繰り返しても線が動かない |
+
+試験 98件 → **130件**（e2e +22・バッテリー +10）、全 green。
+
+### 静的検査の結果
+
+```
+python "C:/Users/winba/.claude/plugins/cache/rally/rally/0.6.0/scripts/rally_test_audit.py" --root .
+  1. 記録にあるが tests/ に無いテスト名: 0 件
+  2. assert の無い test 関数: 0 件
+  3. 理由の無い skip: 0 件
+  4. 例外の握り潰し: 10 件
+```
+
+4 は前回の9件に1件増えた。増えた分も意図したフェイルオープンで、直さず残す。
+
+| 箇所 | 残す理由 |
+|---|---|
+| `relay_common.jobs_in_flight()` | ジョブ指示書が無い＝そもそも渡されていない。`stat` が失敗したら「実行中ではない」に倒すのが安全側（促しが出るだけで、黙って記録が飛ぶことはない） |
+
+2 は前回「0件」と記録していたが、実際には
+`test_the_job_body_needs_only_what_the_hook_hands_it` が assert を持たないまま残っていた
+（`format` が KeyError を投げることだけを頼りにしていた）。本文が組み上がったことを
+1行で確かめる assert を足して解消した。
+
+### 煙試験（実装を6か所壊して red を確認）
+
+| 壊した箇所 | 結果 |
+|---|---|
+| `relay_detect` の epoch 判定を削除 | **9 failed** |
+| `session_epoch` を毎回引き直すように変更 | **41 failed** |
+| 壊れた epoch をフェイルクローズ（現在時刻）に変更 | **1 failed** |
+| `jobs_in_flight` が常に空集合を返すように変更 | **4 failed** |
+| Stop hook の in-flight 判定をジョブ組み直しの後ろへ移動 | **8 failed** |
+| 現在地ジョブの材料から直近日記の合流を削除 | **1 failed** |
+
+6件すべてで red を確認し、戻して 130件 green。
