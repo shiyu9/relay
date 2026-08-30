@@ -20,6 +20,7 @@ from relay_test_support import RelayCase, dt, utc_text  # noqa: E402
 import relay_apply  # noqa: E402
 import relay_common  # noqa: E402
 import relay_detect  # noqa: E402
+import relay_prompts  # noqa: E402
 import relay_stop_hook  # noqa: E402
 import session_end_hook  # noqa: E402
 import session_start_hook  # noqa: E402
@@ -150,9 +151,30 @@ class TestOneEntryPerTranscript(PipelineCase):
         self.make_transcript(OTHER, dt(2026, 8, 29, 23, 50),
                              dt(2026, 8, 30, 1, 30), mtime=time.time() - 7200)
         self.record(OTHER)
-        self.assertIn(f"## S1 23:50-01:30 ({OTHER[:8]})",
+        self.assertIn(f"## S1 23:50-01:30+1d ({OTHER[:8]})",
                       self.read_diary("2026-08-29"))
         self.assertEqual(self.read_diary("2026-08-30"), "")
+
+    def test_a_multi_day_session_records_how_many_days_it_spanned(self):
+        self.make_transcript(OTHER, dt(2026, 8, 26, 8, 14),
+                             dt(2026, 8, 29, 8, 13), mtime=time.time() - 7200)
+        self.record(OTHER)
+        # "08:14-08:13" alone would read as ending before it started.
+        self.assertIn(f"## S1 08:14-08:13+3d ({OTHER[:8]})",
+                      self.read_diary("2026-08-26"))
+
+    def test_a_multi_day_entry_is_not_recorded_a_second_time(self):
+        """The end time has to survive the round trip through the heading.
+
+        Dropping the day count parses the entry back as ending three days
+        early, so the transcript looks newer than its own entry and is
+        re-recorded on every single startup, forever.
+        """
+        self.make_transcript(OTHER, dt(2026, 8, 26, 8, 14),
+                             dt(2026, 8, 29, 8, 13), mtime=time.time() - 7200)
+        self.record(OTHER)
+        still_pending = [p.sid8 for p in relay_detect.pending_sessions(self.cwd)]
+        self.assertNotIn(OTHER[:8], still_pending)
 
     def _long_gap(self):
         """An entry from 20 days ago, and the same transcript woken up today.
@@ -429,6 +451,106 @@ class TestPruneTrigger(PipelineCase):
         summary = self.summary()
         self.assertLessEqual(int(summary["pitfalls_lines"]), int(summary["limit"]))
         self.assertLessEqual(int(summary["workflow_lines"]), int(summary["limit"]))
+
+
+class TestPruneCannotEraseNewBullets(PipelineCase):
+    """Feature: 剪定は、剪定係が見ていない項目を消さない"""
+
+    def setUp(self):
+        super().setUp()
+        self.write_knowledge("pitfalls.md", "- [2026-01-01] 古い罠\n")
+        self.write_knowledge("workflow.md", "- [2026-01-01] 古い進め方\n")
+        self.make_transcript(SID, dt(2026, 8, 27, 19, 11),
+                             dt(2026, 8, 27, 22, 30), mtime=time.time() - 7200)
+        self.start_hook()   # prune.md はここで「古い罠」だけを埋め込む
+
+    def prune_job(self):
+        return relay_common.read_text(
+            relay_common.jobs_dir(self.cwd) / "prune.md")
+
+    def test_a_prune_built_before_the_appends_is_refused(self):
+        """剪定係の入力に無い項目は、剪定の適用で消えてはならない。
+
+        剪定は2ファイルを全文で置き換える。ジョブが書かれたあとに追記が
+        入っていると、その項目は剪定係の入力に存在せず、出力にも現れない
+        ——そのまま適用すれば痕跡なく消える。
+        """
+        self.write_knowledge(
+            "pitfalls.md", "- [2026-01-01] 古い罠\n- [2026-08-30] 新しい罠\n")
+        self.put_inbox("p", "===PRUNE_PITFALLS===\n- [2026-01-01] 古い罠\n"
+                            "===PRUNE_WORKFLOW===\n- [2026-01-01] 古い進め方\n"
+                            "===END===\n")
+        summary = self.summary()
+        self.assertEqual(summary["stale"], "1")
+        self.assertIn("新しい罠", self.read_knowledge("pitfalls.md"))
+
+    def test_apply_rebuilds_the_prune_job_from_the_current_files(self):
+        self.assertNotIn("新しい罠", self.prune_job())
+        self.put_inbox(SID, "===DIARY===\n### done\n- x\n===PITFALLS===\n"
+                            "- [2026-08-30] 新しい罠\n===WORKFLOW===\n===END===\n")
+        self.apply()
+        self.assertIn("新しい罠", self.prune_job())
+
+    def test_the_job_is_never_told_to_hit_a_line_count(self):
+        """行数のための削除が、剪定が防ぐはずの「一次情報の消失」を起こした。
+
+        imagegen 実測: pitfalls 130項目→43項目。落ちた92件は重複でも古い項目
+        でもなく、測って得た一次情報だった。重複は実質1組しかなく、80行には
+        統合では届かないので、従う限り削除するしかなかった。
+        """
+        body = relay_prompts.PRUNE
+        self.assertIn("項目を削除しないこと", body)
+        self.assertNotIn("行以内に収める", body)
+
+    def test_move_candidates_go_to_the_diary_and_nothing_is_deleted(self):
+        self.put_inbox("p", "===PRUNE_PITFALLS===\n- [2026-01-01] 古い罠\n"
+                            "===PRUNE_WORKFLOW===\n===MOVE===\n"
+                            "- [2026-01-01] 古い罠。理由: docs/ の資料に属する\n"
+                            "===END===\n")
+        summary = self.summary()
+        self.assertEqual(summary["move"], "1")
+        today = self.read_diary(f"{relay_common.local_now():%Y-%m-%d}")
+        self.assertIn(relay_common.MOVE_HEADING, today)
+        self.assertIn("docs/ の資料に属する", today)
+        # 候補を挙げただけ。knowledge からは何も消えない。
+        self.assertIn("古い罠", self.read_knowledge("pitfalls.md"))
+
+    def test_the_move_note_is_not_injected(self):
+        self.put_inbox("p", "===PRUNE_PITFALLS===\n- [2026-01-01] 古い罠\n"
+                            "===PRUNE_WORKFLOW===\n===MOVE===\n"
+                            "- [2026-01-01] 古い罠。理由: docs/ に属する\n"
+                            "===END===\n")
+        self.apply()
+        today = f"{relay_common.local_now():%Y-%m-%d}"
+        self.assertIn(relay_common.MOVE_HEADING, self.read_diary(today))
+        headings = [e.heading.strip()
+                    for e in session_start_hook.recent_entries(self.cwd)]
+        self.assertNotIn(relay_common.MOVE_HEADING, headings)
+
+    def test_the_merge_is_due_only_while_something_changed(self):
+        """大きいだけのプロジェクトで毎起動発火させない。
+
+        削除が禁じられた以上、行数は上限を下回らない。閾値だけを条件にすると
+        同じ報告を毎回作り直すことになる。
+        """
+        self.write_knowledge(
+            "pitfalls.md", "".join(f"- [2026-01-01] 行{i}\n" for i in range(81)))
+        self.assertEqual(self.summary()["merge_due"], "yes")
+        kept = "".join(f"- [2026-01-01] 行{i}\n" for i in range(81))
+        self.put_inbox("p", f"===PRUNE_PITFALLS===\n{kept}"
+                            "===PRUNE_WORKFLOW===\n===MOVE===\n===END===\n")
+        self.assertEqual(self.summary()["merge_due"], "no")
+        self.put_inbox("a", "===PITFALLS===\n- [2026-08-30] 新しい罠\n===END===\n")
+        self.assertEqual(self.summary()["merge_due"], "yes")
+
+    def test_a_prune_matching_the_current_files_is_applied(self):
+        self.put_inbox("p", "===PRUNE_PITFALLS===\n- [2026-01-01] 統合した罠\n"
+                            "===PRUNE_WORKFLOW===\n- [2026-01-01] 古い進め方\n"
+                            "===END===\n")
+        summary = self.summary()
+        self.assertEqual(summary["stale"], "0")
+        self.assertEqual(self.read_knowledge("pitfalls.md"),
+                         "- [2026-01-01] 統合した罠\n")
 
 
 class TestStopHook(PipelineCase):

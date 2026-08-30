@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import relay_prompts
 from relay_common import (
     DROPPED_HEADING,
+    MOVE_HEADING,
     PRUNE_LINES,
     all_entries,
     force_utf8,
@@ -33,6 +34,7 @@ from relay_common import (
     log,
     read_hook_input,
     read_text,
+    write_prune_job,
 )
 from relay_detect import pending_sessions
 
@@ -68,7 +70,7 @@ def recent_entries(cwd, limit=INJECT_ENTRIES):
     otherwise inject four times as much as a day holding one.
     """
     entries = [e for e in all_entries(cwd)
-               if e.heading.strip() != DROPPED_HEADING]
+               if e.heading.strip() not in (DROPPED_HEADING, MOVE_HEADING)]
     entries.sort(key=lambda e: e.sort_key())
     return entries[-limit:]
 
@@ -125,13 +127,10 @@ def write_jobs(cwd, pending, here):
         decided=read_text(knowledge_path(cwd, "decided.md")).strip() or "(まだ無い)",
     ), encoding="utf-8")
 
-    prune = jobs / "prune.md"
-    prune.write_text(relay_prompts.PRUNE.format(
-        out=(inbox / "prune.txt").as_posix(),
-        pitfalls=pitfalls, workflow=workflow,
-        pitfalls_lines=len(pitfalls.splitlines()),
-        workflow_lines=len(workflow.splitlines()),
-        limit=PRUNE_LINES), encoding="utf-8")
+    # Written here so the path in the notice exists, and stamped so a run of
+    # it can be refused later. relay_apply rewrites it after every apply,
+    # because the recording jobs append to the very files it embeds.
+    prune = write_prune_job(cwd)
 
     apply_cmd = 'python "{}" --cwd "{}"'.format(
         (here / "relay_apply.py").as_posix(), pathlib.Path(cwd).as_posix())

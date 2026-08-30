@@ -6,6 +6,7 @@ than the transcript's last timestamp. Everything below exists to make that
 one comparison cheap and exact.
 """
 import datetime
+import hashlib
 import json
 import os
 import pathlib
@@ -40,9 +41,14 @@ DEFAULT_MIN_USER_MSGS = 3
 # knowledge/ files are meant to stay small; past this the pruning job runs.
 PRUNE_LINES = 80
 
-# "## S1 19:11-22:30 (124c52dd)" — the only headings relay owns.
+# "## S1 19:11-22:30 (124c52dd)" — the only headings relay owns. A session
+# that ran past midnight carries the day count too ("08:14-08:13+3d"): without
+# it a multi-day span reads as ending before it started, and the end time it
+# parses back to is wrong by however many days were dropped, which keeps
+# detection seeing the transcript as newer than its own entry forever.
 ENTRY_RE = re.compile(
-    r"^## S(\d+) (\d{2}):(\d{2})-(\d{2}):(\d{2}) \(([0-9a-f]{8})\)\s*$")
+    r"^## S(\d+) (\d{2}):(\d{2})-(\d{2}):(\d{2})(?:\+(\d+)d)? "
+    r"\(([0-9a-f]{8})\)\s*$")
 # A heading that looks like it carries an id but does not parse. Kept apart
 # from "has no id at all": those are other people's headings and we leave
 # them alone, while a broken one means our own writing went wrong.
@@ -50,6 +56,7 @@ IDISH_RE = re.compile(r"^## .*\([0-9a-fA-F]{4,12}\)\s*$")
 DIARY_NAME_RE = re.compile(r"\d{4}-\d{2}-\d{2}\.md")
 # Written by relay_apply, never by a model; excluded from injection.
 DROPPED_HEADING = "## relay: decided.md から落とした項目"
+MOVE_HEADING = "## relay: knowledge/ の移設候補"
 
 
 def local_now():
@@ -199,6 +206,73 @@ def read_text(path):
         return pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
+
+
+def prune_fingerprint(cwd):
+    """Hash of the two knowledge files, as they are right now.
+
+    The prune job embeds their text and answers with a full replacement, so
+    it is only safe to apply while the files still say what the job was built
+    from. Anything appended in between would be silently erased.
+    """
+    h = hashlib.sha256()
+    for name in ("pitfalls.md", "workflow.md"):
+        h.update(read_text(knowledge_path(cwd, name)).encode("utf-8"))
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def write_prune_job(cwd):
+    """(Re)write the prune job from the knowledge files as they stand.
+
+    Written once at session start and again at the end of every apply run:
+    the recording jobs append to pitfalls.md and workflow.md *after* the
+    session start hook has run, so a job written only at start time is stale
+    by the time the model is told to run it.
+    """
+    import relay_prompts  # here, not at import time: relay_prompts imports nothing
+
+    jobs = jobs_dir(cwd)
+    jobs.mkdir(parents=True, exist_ok=True)
+    inbox = inbox_dir(cwd)
+    inbox.mkdir(parents=True, exist_ok=True)
+    pitfalls = read_text(knowledge_path(cwd, "pitfalls.md")).strip() or "(empty)"
+    workflow = read_text(knowledge_path(cwd, "workflow.md")).strip() or "(empty)"
+    path = jobs / "prune.md"
+    path.write_text(relay_prompts.PRUNE.format(
+        out=(inbox / "prune.txt").as_posix(),
+        pitfalls=pitfalls, workflow=workflow,
+        pitfalls_lines=len(pitfalls.splitlines()),
+        workflow_lines=len(workflow.splitlines()),
+        limit=PRUNE_LINES), encoding="utf-8")
+    (jobs / "prune.stamp").write_text(prune_fingerprint(cwd), encoding="utf-8")
+    return path
+
+
+def line_count(path):
+    return len([l for l in read_text(path).splitlines() if l.strip()])
+
+
+def merge_due(cwd):
+    """Should the merge job run? Size alone is not enough to decide.
+
+    The job may no longer delete items to hit a line count, so a project that
+    is simply large stays over the mark forever: the threshold on its own
+    would fire every single startup and re-report the same thing. Pairing it
+    with the fingerprint of the last completed merge turns it back into
+    "something changed here since we last looked".
+    """
+    if not any(line_count(knowledge_path(cwd, n)) > PRUNE_LINES
+               for n in ("pitfalls.md", "workflow.md")):
+        return False
+    return read_text(jobs_dir(cwd) / "prune.done").strip() != prune_fingerprint(cwd)
+
+
+def mark_merge_done(cwd):
+    """Remember what the files looked like when the merge last finished."""
+    jobs = jobs_dir(cwd)
+    jobs.mkdir(parents=True, exist_ok=True)
+    (jobs / "prune.done").write_text(prune_fingerprint(cwd), encoding="utf-8")
 
 
 def _chunk_timestamps(path, from_end):
@@ -353,12 +427,14 @@ def parse_diary_file(path):
         stop = heads[i + 1][0] if i + 1 < len(heads) else len(text)
         m = ENTRY_RE.match(heading)
         if m:
-            num, sh, sm, eh, em, sid8 = m.groups()
+            num, sh, sm, eh, em, days, sid8 = m.groups()
             day = datetime.date.fromisoformat(path.name[:-3])
             start = datetime.datetime.combine(
                 day, datetime.time(int(sh), int(sm)))
             end = datetime.datetime.combine(day, datetime.time(int(eh), int(em)))
-            if end < start:  # ran past midnight
+            if days is not None:
+                end += datetime.timedelta(days=int(days))
+            elif end < start:  # ran past midnight; written before "+Nd" existed
                 end += datetime.timedelta(days=1)
             entries.append(Entry(path, i, heading, (pos, stop), text[pos:stop],
                                  sid8=sid8, start=start, end=end, num=int(num)))

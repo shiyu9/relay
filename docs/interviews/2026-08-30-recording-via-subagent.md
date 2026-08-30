@@ -215,7 +215,16 @@ Feature: 1 transcript = 1 日記エントリ
 
   Scenario: 日付をまたぐセッションは開始日のファイルに1つ
     Given 8/29 23:50 に始まり 8/30 01:30 に終わった transcript がある
-    Then diary/2026-08-29.md に "## S<n> 23:50-01:30 (<id8>)" が入る
+    Then diary/2026-08-29.md に "## S<n> 23:50-01:30+1d (<id8>)" が入る
+
+  Scenario: またいだ日数が見出しに残る
+    Given 8/26 08:14 に始まり 8/29 08:13 に終わった transcript がある
+    Then diary/2026-08-26.md に "## S<n> 08:14-08:13+3d (<id8>)" が入る
+
+  Scenario: 日付をまたいだエントリは二度目に記録されない
+    Given 上のエントリが書かれている
+    Then そのセッションは pending_sessions() に現れない
+    # 日数が無いと終了時刻が2日ぶん過去に読まれ、毎起動 replace で再記録される
 
   Scenario: 15日以上の断絶があれば新しいエントリになる
     Given diary/2026-08-10.md に "## S1 19:11-22:30 (<id8>)" がある
@@ -300,6 +309,40 @@ Feature: 発火の連鎖
   Scenario: ①の追記で80行を超えたら③が起動する
     Given pitfalls.md が79行で、①が2行追記した
     Then stdout の pitfalls_lines は 81 であり、手順は③を起動する
+
+  Scenario: 前回の統合から中身が変わっていなければ③は起動しない
+    Given pitfalls.md が81行で、③が一度完了している
+    Then stdout の merge_due は no である
+    When さらに1項追記される
+    Then merge_due は yes に戻る
+
+Feature: 統合は項目を消さない
+  Scenario: 行数のために削らせない
+    Given ジョブの規則に「行以内に収める」は無い
+    Then 「項目を削除しないこと」が明記されている
+
+  Scenario: 移設候補は日記に出る（knowledge からは消えない）
+    Given ③が MOVE 節に候補を1件挙げた
+    Then 日記に "## relay: knowledge/ の移設候補" として書かれる
+    And pitfalls.md からその項目は消えていない
+    And この見出しは注入の直近5件に数えられない
+
+Feature: 統合は、統合係が見ていない項目を消さない
+  Scenario: ジョブ生成後の追記がある剪定は適用しない
+    Given prune.md が "古い罠" だけを埋め込んで生成されている
+    And そのあと pitfalls.md に "新しい罠" が追記された
+    When "古い罠" だけを剪定した全文が返る
+    Then pitfalls.md は置き換えられず、"新しい罠" が残る
+    And stdout の stale は 1 になる
+
+  Scenario: apply が剪定ジョブを現在の本文で作り直す
+    Given prune.md が "新しい罠" を含まない状態で生成されている
+    When ①が "新しい罠" を追記して apply が走る
+    Then prune.md は作り直され、"新しい罠" を含む
+
+  Scenario: 実ファイルと一致する剪定はそのまま適用される
+    Given pitfalls.md がジョブ生成時から変わっていない
+    Then 剪定した全文がそのまま書かれ、stale は 0 のまま
 
 Feature: 注入
   Scenario: 日記は件数で切る（日数ではない）
