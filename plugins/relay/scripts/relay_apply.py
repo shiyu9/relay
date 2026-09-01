@@ -19,6 +19,8 @@ from relay_common import (
     DROPPED_HEADING,
     MOVE_HEADING,
     PRUNE_LINES,
+    TASKS_DONE_HEADING,
+    TASK_OPEN_RE,
     diary_dir,
     force_utf8,
     inbox_dir,
@@ -32,6 +34,7 @@ from relay_common import (
     parse_diary_file,
     prune_fingerprint,
     read_text,
+    remove_tasks,
     write_prune_job,
     write_atomic,
 )
@@ -40,8 +43,8 @@ from relay_detect import plan_entry
 # Longest names first so ===PRUNE_PITFALLS=== can never be read as a plain
 # ===PITFALLS===; the two mean append and replace respectively.
 SECTION_RE = re.compile(
-    r"===(PRUNE_PITFALLS|PRUNE_WORKFLOW|DIARY|PITFALLS|WORKFLOW|CURRENT|DECIDED"
-    r"|MOVE|END)===")
+    r"===(PRUNE_PITFALLS|PRUNE_WORKFLOW|TASKS_DONE|DIARY|PITFALLS|WORKFLOW"
+    r"|CURRENT|DECIDED|MOVE|END)===")
 # The bullet marker and any date the model wrote anyway. Only a bracket that
 # starts with a date is eaten: "- [進行中] ..." is content, not a stamp.
 DATE_PREFIX_RE = re.compile(r"^-\s*(?:\[\s*\d{4}-\d{1,2}-\d{1,2}[^]]*\]\s*)?")
@@ -181,7 +184,8 @@ def main():
     decided_path = knowledge_path(cwd, "decided.md")
 
     stats = {"diary": 0, "pitfalls": 0, "workflow": 0, "current": "-",
-             "decided": "-", "dropped": 0, "bad": 0, "stale": 0, "move": 0}
+             "decided": "-", "dropped": 0, "bad": 0, "stale": 0, "move": 0,
+             "tasks": 0}
     did_merge = False
 
     files = sorted(inbox.glob("*.txt")) if inbox.is_dir() else []
@@ -249,6 +253,27 @@ def main():
                 write_atomic(path, body.rstrip() + "\n")
                 stats[key.lower()] = "written"
 
+            # Striking items off tasks.md. A missing section is not a
+            # failure: it means either that nothing finished or that the job
+            # predates this section, and neither may look like an error —
+            # nothing is deleted in either case, and the same items come back
+            # as candidates on the next run. Only lines the model copied
+            # verbatim can match, so a paraphrase removes nothing at all.
+            keys = [l.strip()
+                    for l in sections.get("TASKS_DONE", "").splitlines()
+                    if TASK_OPEN_RE.match(l.strip())]
+            if keys:
+                removed = remove_tasks(cwd, keys)
+                struck = [l for l in removed if TASK_OPEN_RE.match(l)]
+                if removed:
+                    # Whole items, continuation lines and all: this copy is
+                    # what a wrong strike-off is recovered from.
+                    append_under(cwd, TASKS_DONE_HEADING, removed)
+                    stats["tasks"] += len(struck)
+                if len(struck) < len(keys):
+                    log("apply", f"{len(keys) - len(struck)} task line(s) did "
+                                 "not match tasks.md; nothing removed for them")
+
             # Merging replaces both files in full, so it may only be applied
             # while they still hold what the job was built from. The recording
             # jobs append to them after the job file is written, and those
@@ -304,8 +329,8 @@ def main():
 
     print("diary={diary} pitfalls=+{pitfalls} workflow=+{workflow} "
           "current={current} decided={decided} dropped={dropped} bad={bad} "
-          "stale={stale} move={move} pitfalls_lines={pl} workflow_lines={wl} "
-          "limit={limit} merge_due={due}".format(
+          "stale={stale} move={move} tasks=-{tasks} pitfalls_lines={pl} "
+          "workflow_lines={wl} limit={limit} merge_due={due}".format(
               pl=line_count(pitfalls_path), wl=line_count(workflow_path),
               limit=PRUNE_LINES, due="yes" if merge_due(cwd) else "no",
               **stats))

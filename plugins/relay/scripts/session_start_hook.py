@@ -30,6 +30,7 @@ from relay_common import (
     read_hook_input,
     read_text,
     recent_entries,
+    tasks_outline,
 )
 from relay_detect import pending_sessions
 from relay_jobs import write_jobs
@@ -65,6 +66,13 @@ def build_sections(cwd):
     if body.strip():
         sections.append(
             f"## diary（直近{INJECT_ENTRIES}件・handoff は current.md に集約）\n\n{body}")
+
+    # Between the diary and current.md, on the same "least changeable first"
+    # rule: tasks.md only changes on the runs where an item is struck off,
+    # while current.md is rewritten in full every single session.
+    outline = tasks_outline(cwd).strip()
+    if outline:
+        sections.append("## tasks.md（未完のタスク）\n\n" + outline)
 
     # Last on purpose: current.md is rewritten every session, so keeping it at
     # the end leaves the longest shared prefix for caching (and puts the most

@@ -18,6 +18,7 @@ from relay_common import (
     knowledge_path,
     read_text,
     recent_entries,
+    tasks_outline,
     write_prune_job,
 )
 
@@ -63,12 +64,17 @@ def write_jobs(cwd, pending, here=SCRIPTS):
     diary_paths = "\n".join(
         f"  - {(pathlib.Path(cwd) / 'diary' / (d + '.md')).as_posix()}"
         for d in sorted(dates))
+    # The task list is pasted in rather than pointed at, like current.md and
+    # decided.md: the job answers with lines copied out of it, and a match is
+    # exact, so the model has to be looking at the same text relay_apply will
+    # compare against.
     overwrite = jobs / "overwrite.md"
     overwrite.write_text(relay_prompts.OVERWRITE.format(
         out=(inbox / "overwrite.txt").as_posix(),
         diary_paths=diary_paths,
         current=read_text(knowledge_path(cwd, "current.md")).strip() or "(まだ無い)",
         decided=read_text(knowledge_path(cwd, "decided.md")).strip() or "(まだ無い)",
+        tasks=tasks_outline(cwd).strip() or "(まだ無い)",
     ), encoding="utf-8")
 
     # Written here so the path in the notice exists, and stamped so a run of

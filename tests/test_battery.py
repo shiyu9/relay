@@ -431,5 +431,138 @@ class TestInFlightJobs(ApplyCase):
         self.assertEqual(relay_common.jobs_in_flight(self.cwd, []), set())
 
 
+# --- 9 striking tasks off tasks.md ---------------------------------------
+
+# Shaped like the real files: prose the project wrote for itself, items whose
+# meaning lives in their continuation lines, a nested bullet, and one box
+# already ticked.
+TASKS = """\
+# tasks
+
+未完のタスクだけを置く。完了したものは消す。
+
+## 作業が残っているもの
+
+- [ ] **E2E テスト**: 承認済み Gherkin をコード化する。現状 `tests/e2e/` は無い
+- [ ] **bundle 分割**: 760KB / gzip 236KB
+      この値は 2026-07-20 時点の実測で、PR B の後は未再測
+      - 2026-08-31 にコードで確認: `PdfViewer` 無し
+- [x] **済んだもの**: これは relay の持ち物ではない
+
+## 確認が済んでいないもの
+
+- [ ] **iPad Safari での音声再生**: 実機確認の記録なし
+"""
+E2E_KEY = "- [ ] **E2E テスト**: 承認済み Gherkin をコード化する。現状 `tests/e2e/` は無い"
+BUNDLE_KEY = "- [ ] **bundle 分割**: 760KB / gzip 236KB"
+
+
+class TasksCase(ApplyCase):
+    def setUp(self):
+        super().setUp()
+        self.write_tasks(TASKS)
+
+    def items(self):
+        return relay_common.parse_tasks(relay_common.tasks_path(self.cwd))
+
+    def strike(self, *keys):
+        """Run one apply whose only section names these items as finished."""
+        body = "\n".join(keys)
+        self.put_inbox("overwrite", f"===TASKS_DONE===\n{body}\n===END===\n")
+        return self.summary()
+
+
+class TestTaskParsing(TasksCase):
+    def test_a_ticked_box_is_not_relays_business(self):
+        self.assertNotIn("済んだもの", " ".join(t.key for t in self.items()))
+        self.assertEqual(len(self.items()), 3)
+
+    def test_an_item_keeps_the_lines_that_explain_it(self):
+        bundle = next(t for t in self.items() if t.key == BUNDLE_KEY)
+        self.assertEqual(len(bundle.lines), 3)
+        self.assertIn("PdfViewer", "\n".join(bundle.lines))
+
+    def test_a_heading_ends_the_item_above_it(self):
+        ipad = next(t for t in self.items() if "iPad" in t.key)
+        self.assertEqual(len(ipad.lines), 1)
+        self.assertEqual(ipad.heading, "## 確認が済んでいないもの")
+
+    def test_prose_between_items_is_not_an_item(self):
+        outline = relay_common.tasks_outline(self.cwd)
+        self.assertNotIn("完了したものは消す", outline)
+        self.assertIn("## 作業が残っているもの", outline)
+
+    def test_a_project_without_the_file_reads_as_no_tasks(self):
+        relay_common.tasks_path(self.cwd).unlink()
+        self.assertEqual(relay_common.tasks_outline(self.cwd), "")
+        self.assertEqual(self.items(), [])
+
+
+class TestStrikeOffMatching(TasksCase):
+    def test_a_verbatim_line_strikes_its_item_off(self):
+        self.assertEqual(self.strike(E2E_KEY)["tasks"], "-1")
+        self.assertNotIn("E2E テスト", self.read_tasks())
+
+    def test_a_paraphrase_removes_nothing(self):
+        before = self.read_tasks()
+        self.assertEqual(self.strike("- [ ] E2E テストを書く")["tasks"], "-0")
+        self.assertEqual(self.read_tasks(), before)
+
+    def test_a_truncated_line_removes_nothing(self):
+        before = self.read_tasks()
+        self.assertEqual(self.strike("- [ ] **E2E テスト**")["tasks"], "-0")
+        self.assertEqual(self.read_tasks(), before)
+
+    def test_striking_takes_the_continuation_lines_with_it(self):
+        self.strike(BUNDLE_KEY)
+        left = self.read_tasks()
+        self.assertNotIn("PdfViewer", left)
+        self.assertNotIn("未再測", left)
+        self.assertIn("iPad", left)
+
+    def test_one_bad_line_does_not_stop_the_good_one(self):
+        self.assertEqual(
+            self.strike(E2E_KEY, "- [ ] 存在しない項目")["tasks"], "-1")
+        self.assertNotIn("E2E テスト", self.read_tasks())
+        self.assertIn("bundle 分割", self.read_tasks())
+
+    def test_a_missing_section_is_not_a_failure(self):
+        before = self.read_tasks()
+        self.put_inbox("overwrite", "===CURRENT===\nいまここ\n===END===\n")
+        summary = self.summary()
+        self.assertEqual(summary["bad"], "0")
+        self.assertEqual(summary["tasks"], "-0")
+        self.assertEqual(self.read_tasks(), before)
+
+    def test_an_empty_section_is_not_a_failure(self):
+        before = self.read_tasks()
+        summary = self.strike("")
+        self.assertEqual(summary["bad"], "0")
+        self.assertEqual(summary["tasks"], "-0")
+        self.assertEqual(self.read_tasks(), before)
+
+
+class TestStruckItemsStayRecoverable(TasksCase):
+    def today(self):
+        return self.read_diary(f"{relay_common.local_now():%Y-%m-%d}")
+
+    def test_the_whole_item_lands_in_todays_diary(self):
+        self.strike(BUNDLE_KEY)
+        body = self.today()
+        self.assertIn(relay_common.TASKS_DONE_HEADING, body)
+        self.assertIn("PdfViewer", body)
+        self.assertIn(BUNDLE_KEY, body)
+
+    def test_nothing_is_written_when_nothing_matched(self):
+        self.strike("- [ ] 存在しない項目")
+        self.assertNotIn(relay_common.TASKS_DONE_HEADING, self.today())
+
+    def test_the_recovery_heading_is_kept_out_of_the_material(self):
+        self.strike(E2E_KEY)
+        headings = [e.heading.strip() for e in
+                    relay_common.recent_entries(self.cwd)]
+        self.assertNotIn(relay_common.TASKS_DONE_HEADING, headings)
+
+
 if __name__ == "__main__":
     unittest.main()

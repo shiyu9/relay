@@ -66,6 +66,14 @@ DIARY_NAME_RE = re.compile(r"\d{4}-\d{2}-\d{2}\.md")
 # Written by relay_apply, never by a model; excluded from injection.
 DROPPED_HEADING = "## relay: decided.md から落とした項目"
 MOVE_HEADING = "## relay: knowledge/ の移設候補"
+TASKS_DONE_HEADING = "## relay: 完了として tasks.md から消した項目"
+
+# "- [ ] ..." at any indent. Only the unchecked box: "[x]" is the project
+# saying it already dealt with the item, and striking those off is not
+# relay's business. Both the injection and the strike-off read items through
+# this, so they can never disagree about where one item ends.
+TASK_OPEN_RE = re.compile(r"^(\s*)- \[ \]")
+MD_HEADING_RE = re.compile(r"^#{1,6} ")
 
 
 def local_now():
@@ -296,6 +304,12 @@ def diary_dir(cwd):
 
 def knowledge_path(cwd, name):
     return pathlib.Path(cwd) / "knowledge" / name
+
+
+def tasks_path(cwd):
+    """The project's own task list. relay reads it and strikes items off;
+    everything that gets added to it is written by the session itself."""
+    return pathlib.Path(cwd) / "tasks.md"
 
 
 def write_atomic(path, text):
@@ -550,6 +564,106 @@ def parse_diary_file(path):
     return entries
 
 
+class Task:
+    """One unchecked item of tasks.md, with the lines that belong to it."""
+
+    def __init__(self, heading, lines, span):
+        self.heading = heading  # nearest heading above it, or None
+        self.lines = lines      # the "- [ ]" line and its continuations
+        self.span = span        # (start, stop) as line indices
+
+    @property
+    def key(self):
+        """What the model has to reproduce to name this item."""
+        return self.lines[0].strip()
+
+
+def parse_tasks(path):
+    """The unchecked items of a tasks.md, each with its continuation lines.
+
+    An item runs until a line at the same indent or shallower begins, or a
+    blank line or heading arrives. The continuations are where the file
+    paths and the reasoning live ("手がかり: src/view/motion.ts"), so an
+    item cut down to its first line loses what makes it actionable — and
+    the same parse decides what gets struck off, which is why a nested
+    bullet counts as part of its parent rather than as a new item.
+    """
+    text = read_text(path)
+    if not text:
+        return []
+    lines = text.splitlines()
+    out = []
+    heading = None
+    i = 0
+    while i < len(lines):
+        if MD_HEADING_RE.match(lines[i]):
+            heading = lines[i]
+            i += 1
+            continue
+        m = TASK_OPEN_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        indent = len(m.group(1))
+        start = i
+        i += 1
+        while i < len(lines):
+            nxt = lines[i]
+            if not nxt.strip() or MD_HEADING_RE.match(nxt):
+                break
+            if len(nxt) - len(nxt.lstrip()) <= indent:
+                break
+            i += 1
+        out.append(Task(heading, lines[start:i], (start, i)))
+    return out
+
+
+def tasks_outline(cwd):
+    """The unchecked items of tasks.md as they are injected and offered.
+
+    Only the items and the heading each sits under: the rest of the file is
+    prose the project wrote for itself — status paragraphs, format notes,
+    tables of where the originals live — and none of it is what the next
+    session needs in front of it. Measured over the eight projects that
+    have the file, this keeps 4-86 lines out of 18-159.
+    """
+    out = []
+    seen = None
+    for t in parse_tasks(tasks_path(cwd)):
+        if t.heading and t.heading != seen:
+            out.append(t.heading)
+            seen = t.heading
+        out.extend(t.lines)
+    return "\n".join(out)
+
+
+def remove_tasks(cwd, keys):
+    """Strike the named items off tasks.md; return the lines removed.
+
+    `keys` are first lines as the model reproduced them, and an item goes
+    only when one of them matches its own first line exactly. A paraphrase,
+    a truncation, or an item edited since the job was built therefore
+    removes nothing at all: the file is not touched and the caller sees an
+    empty list. That is the whole safety story — the diary copy exists to
+    recover from a wrong-but-matching answer, not to excuse a loose match.
+    """
+    path = tasks_path(cwd)
+    tasks = parse_tasks(path)
+    wanted = {k.strip() for k in keys}
+    hit = [t for t in tasks if t.key in wanted]
+    if not hit:
+        return []
+    drop = set()
+    removed = []
+    for t in hit:
+        drop.update(range(t.span[0], t.span[1]))
+        removed.extend(t.lines)
+    lines = read_text(path).splitlines()
+    kept = [l for i, l in enumerate(lines) if i not in drop]
+    write_atomic(path, "\n".join(kept).rstrip() + "\n")
+    return removed
+
+
 # Enough diary to see what just happened, without the volume swinging with
 # how many sessions a given day happened to hold.
 INJECT_ENTRIES = 5
@@ -564,7 +678,8 @@ def recent_entries(cwd, limit=INJECT_ENTRIES):
     means the same thing to the reader and to the job that writes current.md.
     """
     entries = [e for e in all_entries(cwd)
-               if e.heading.strip() not in (DROPPED_HEADING, MOVE_HEADING)]
+               if e.heading.strip() not in (DROPPED_HEADING, MOVE_HEADING,
+                                            TASKS_DONE_HEADING)]
     entries.sort(key=lambda e: e.sort_key())
     return entries[-limit:]
 

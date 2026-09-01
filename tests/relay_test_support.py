@@ -139,6 +139,14 @@ class RelayCase(unittest.TestCase):
     def read_knowledge(self, name):
         return relay_common.read_text(relay_common.knowledge_path(self.cwd, name))
 
+    def write_tasks(self, text):
+        p = relay_common.tasks_path(self.cwd)
+        p.write_text(text, encoding="utf-8")
+        return p
+
+    def read_tasks(self):
+        return relay_common.read_text(relay_common.tasks_path(self.cwd))
+
     def put_inbox(self, name, text):
         d = relay_common.inbox_dir(self.cwd)
         d.mkdir(parents=True, exist_ok=True)

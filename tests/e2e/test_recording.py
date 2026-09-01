@@ -900,5 +900,106 @@ class TestTheNudgePointsAtWorkThatIsLeft(PipelineCase):
             fresh)
 
 
+TASKS = """\
+# tasks
+
+未完のタスクだけを置く。
+
+## 作業が残っているもの
+
+- [ ] **実機確認**: iPad Safari での再生を確かめる
+      PR #6 の申し送りに「未確認（要実機）」とある
+- [ ] **bundle 分割**: 760KB / gzip 236KB
+"""
+IPAD = "- [ ] **実機確認**: iPad Safari での再生を確かめる"
+
+
+class TestTasksReachTheReader(PipelineCase):
+    """tasks.md is injected, and it is injected where it belongs."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_tasks(TASKS)
+
+    def test_the_unchecked_items_are_injected(self):
+        out = self.start_hook()
+        self.assertIn("## tasks.md（未完のタスク）", out)
+        self.assertIn(IPAD, out)
+        self.assertIn("PR #6 の申し送り", out)
+
+    def test_the_prose_around_them_is_not(self):
+        self.assertNotIn("未完のタスクだけを置く", self.start_hook())
+
+    def test_it_sits_between_the_diary_and_current(self):
+        self.write_diary("2026-08-27", "## S1 19:11-22:30 (124c52dd)\n"
+                                       "### done\n- 何かした\n")
+        self.write_knowledge("current.md", "いまここ")
+        out = self.start_hook()
+        self.assertLess(out.index("## diary"), out.index("## tasks.md"))
+        self.assertLess(out.index("## tasks.md"),
+                        out.index("knowledge/current.md"))
+
+    def test_a_project_without_the_file_gets_no_section(self):
+        relay_common.tasks_path(self.cwd).unlink()
+        self.assertNotIn("tasks.md", self.start_hook())
+
+
+class TestTheStrikeOffJobHasWhatItNeeds(PipelineCase):
+    """The overwrite job must see the same text relay_apply will match on."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_tasks(TASKS)
+        self.make_transcript(SID, dt(2026, 8, 27, 19, 11),
+                             dt(2026, 8, 27, 22, 30), mtime=time.time() - 7200)
+        self.start_hook()
+
+    def job_body(self):
+        return relay_common.read_text(
+            relay_common.jobs_dir(self.cwd) / "overwrite.md")
+
+    def test_the_items_are_pasted_into_the_job(self):
+        self.assertIn(IPAD, self.job_body())
+
+    def test_the_job_asks_for_the_section(self):
+        self.assertIn("===TASKS_DONE===", self.job_body())
+
+    def test_the_job_names_the_diary_as_the_only_ground(self):
+        self.assertIn("日記の `done`", self.job_body())
+
+    def test_the_call_keeps_tasks_read_only(self):
+        notice = self.start_hook()
+        self.assertIn("`tasks.md` を含む他の", notice)
+
+
+class TestTheWholeStrikeOffPath(PipelineCase):
+    """From a recorded session to an item gone from tasks.md."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_tasks(TASKS)
+
+    def test_a_recorded_session_can_strike_an_item_off(self):
+        self.record(SID, "### done\n- iPad Safari で再生を確認した")
+        self.put_inbox("overwrite", "===CURRENT===\n実機確認まで終わった\n"
+                                    f"===TASKS_DONE===\n{IPAD}\n===END===\n")
+        summary = self.summary()
+        self.assertEqual(summary["tasks"], "-1")
+        self.assertNotIn("iPad Safari", self.read_tasks())
+        self.assertIn("bundle 分割", self.read_tasks())
+        self.assertEqual(self.read_knowledge("current.md").strip(),
+                         "実機確認まで終わった")
+
+    def test_the_next_startup_no_longer_offers_it(self):
+        self.put_inbox("overwrite", f"===TASKS_DONE===\n{IPAD}\n===END===\n")
+        self.apply()
+        self.assertNotIn("iPad Safari", self.start_hook())
+
+    def test_an_item_left_alone_comes_back_next_time(self):
+        self.put_inbox("overwrite", "===TASKS_DONE===\n===END===\n")
+        self.apply()
+        self.assertIn(IPAD, self.start_hook())
+
+
 if __name__ == "__main__":
     unittest.main()
