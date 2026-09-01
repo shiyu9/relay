@@ -21,6 +21,7 @@ from relay_common import (
     PRUNE_LINES,
     TASKS_DONE_HEADING,
     TASK_OPEN_RE,
+    THIN_MARK,
     diary_dir,
     force_utf8,
     inbox_dir,
@@ -185,7 +186,7 @@ def main():
 
     stats = {"diary": 0, "pitfalls": 0, "workflow": 0, "current": "-",
              "decided": "-", "dropped": 0, "bad": 0, "stale": 0, "move": 0,
-             "tasks": 0}
+             "tasks": 0, "thin": 0}
     did_merge = False
 
     files = sorted(inbox.glob("*.txt")) if inbox.is_dir() else []
@@ -194,7 +195,22 @@ def main():
         name = f.stem
         try:
             if "NOTHING_TO_RECORD" in text and "===DIARY===" not in text:
-                log("apply", f"nothing to record ({name})")
+                # The verdict goes in the diary, not only in the log.
+                # Detection asks the diary and nothing else, so a session
+                # left unwritten is offered again on every startup, forever:
+                # observed in freetalk, where one four-minute session was
+                # recorded as "nothing here", nudged again thirty minutes
+                # later, and would have been nudged for as long as its
+                # transcript survived.
+                pending = plan_entry(cwd, name)
+                if pending is None:
+                    stats["bad"] += 1
+                    log("apply", f"cannot place a thin entry for {name}")
+                else:
+                    upsert_entry(cwd, pending, THIN_MARK)
+                    stats["thin"] += 1
+                    log("apply", f"nothing to record ({name}); marked "
+                                 f"{pending.date} {name[:8]}")
                 continue
             sections = parse_sections(text)
             if not sections:
@@ -327,10 +343,11 @@ def main():
     except OSError as e:
         log("apply", f"could not refresh the merge job: {e!r}")
 
-    print("diary={diary} pitfalls=+{pitfalls} workflow=+{workflow} "
-          "current={current} decided={decided} dropped={dropped} bad={bad} "
-          "stale={stale} move={move} tasks=-{tasks} pitfalls_lines={pl} "
-          "workflow_lines={wl} limit={limit} merge_due={due}".format(
+    print("diary={diary} thin={thin} pitfalls=+{pitfalls} "
+          "workflow=+{workflow} current={current} decided={decided} "
+          "dropped={dropped} bad={bad} stale={stale} move={move} "
+          "tasks=-{tasks} pitfalls_lines={pl} workflow_lines={wl} "
+          "limit={limit} merge_due={due}".format(
               pl=line_count(pitfalls_path), wl=line_count(workflow_path),
               limit=PRUNE_LINES, due="yes" if merge_due(cwd) else "no",
               **stats))

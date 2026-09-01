@@ -38,15 +38,12 @@ RESUME_CUTOFF_DAYS = 15
 # Jobs handed to the model in one session start. The rest are caught next
 # time; candidates shrink monotonically, so nothing is stranded.
 MAX_JOBS = 3
-# How long a job file counts as "possibly still running". The recording
-# subagents finish invisibly to Python, so the Stop hook cannot tell an
-# in-flight job from one that was never started; the mtime of the job file
-# is the only evidence either way. Measured runs take 2-4 minutes, and a
-# 165 MB transcript takes longer, so this is deliberately generous: a nudge
-# that arrives too early costs a duplicated job, and duplicated jobs are
-# harmless (upsert_entry replaces by id) but not free.
-JOB_GRACE_SECS = 15 * 60
 DEFAULT_MIN_USER_MSGS = 3
+# How recently a transcript must have been written to be a candidate for
+# "the session running this". The manual entry point names itself with a
+# token, and a tool call reaches the transcript before it runs, so the file
+# holding the token was touched seconds ago; anything older is somebody else.
+SELF_WINDOW_SECS = 5 * 60
 # knowledge/ files are meant to stay small; past this the pruning job runs.
 PRUNE_LINES = 80
 
@@ -67,6 +64,12 @@ DIARY_NAME_RE = re.compile(r"\d{4}-\d{2}-\d{2}\.md")
 DROPPED_HEADING = "## relay: decided.md から落とした項目"
 MOVE_HEADING = "## relay: knowledge/ の移設候補"
 TASKS_DONE_HEADING = "## relay: 完了として tasks.md から消した項目"
+# The whole body of an entry for a session the recorder found nothing in.
+# Detection reads the diary and nothing else, so a session left unwritten is
+# offered again on every single startup — the mark is what lets "we looked,
+# there was nothing" be said at all. Kept out of the injection: an empty
+# session must not take one of the five slots a real handover needs.
+THIN_MARK = "（記録するものがなかったセッション）"
 
 # "- [ ] ..." at any indent. Only the unchecked box: "[x]" is the project
 # saying it already dealt with the item, and striking those off is not
@@ -267,35 +270,39 @@ def session_epoch(cwd, now=None):
     return stamp
 
 
-def jobs_in_flight(cwd, sids, now=None):
-    """Which of `sids` have a job file young enough to still be running.
+def find_self(cwd, token, now=None):
+    """The transcript naming `token`, when exactly one recent file does.
 
-    The recording subagents are invisible to Python: they finish without
-    telling anyone, and the file they write lands in the inbox only once
-    they are done, so "no inbox file" covers not-started, running and
-    already-applied alike. The age of the job file is the one piece of
-    evidence there is, and it is what keeps the Stop hook from shouting
-    "3 unrecorded" at a session that is recording those three right now.
+    A tool call reaches the transcript before it runs, so a script handed a
+    token on its own command line can find the file it is being written
+    into. Verified by running exactly that: the script matched its own
+    transcript and no other.
+
+    Ambiguity is a failure, never a guess. Choosing the newest of two would
+    mean treating somebody else's live session as this one and summarising
+    it mid-flight — the single thing the idle rule exists to prevent. A
+    token quoted elsewhere (in a message, in a diary entry) really can land
+    in two files, and refusing costs one retry with a fresh token.
     """
     now = time.time() if now is None else now
-    jobs = jobs_dir(cwd)
-    out = set()
-    for sid in sids:
+    tdir = transcripts_dir(cwd)
+    if not token or not tdir.is_dir():
+        return None
+    hits = []
+    for p in tdir.glob("*.jsonl"):
         try:
-            if now - os.path.getmtime(jobs / f"{sid}.md") < JOB_GRACE_SECS:
-                out.add(sid)
+            if now - p.stat().st_mtime > SELF_WINDOW_SECS:
+                continue
+            if token in p.read_text(encoding="utf-8", errors="replace"):
+                hits.append(p.stem)
         except OSError:
-            pass  # no job file -> nothing was ever handed out for it
-    return out
+            pass  # unreadable -> not the file we are looking for
+    return hits[0] if len(hits) == 1 else None
 
 
 def inbox_dir(cwd):
     """Where subagents drop their delimited output for relay_apply to read."""
     return relay_home() / "inbox" / sanitize_cwd(cwd)
-
-
-def hook_state_dir():
-    return relay_home() / "hook-state"
 
 
 def diary_dir(cwd):
@@ -664,6 +671,18 @@ def remove_tasks(cwd, keys):
     return removed
 
 
+def is_thin_entry(entry):
+    """Was this entry written only to say the session held nothing?
+
+    It still belongs in the diary — detection asks the diary whether a
+    session was looked at, and this is the answer — but it carries nothing
+    a reader needs, so it is kept out of the injection and out of the
+    material the overwrite job reads.
+    """
+    parts = entry.raw.split("\n", 1)
+    return len(parts) > 1 and parts[1].strip() == THIN_MARK
+
+
 # Enough diary to see what just happened, without the volume swinging with
 # how many sessions a given day happened to hold.
 INJECT_ENTRIES = 5
@@ -679,7 +698,8 @@ def recent_entries(cwd, limit=INJECT_ENTRIES):
     """
     entries = [e for e in all_entries(cwd)
                if e.heading.strip() not in (DROPPED_HEADING, MOVE_HEADING,
-                                            TASKS_DONE_HEADING)]
+                                            TASKS_DONE_HEADING)
+               and not is_thin_entry(e)]
     entries.sort(key=lambda e: e.sort_key())
     return entries[-limit:]
 

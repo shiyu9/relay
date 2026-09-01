@@ -3,8 +3,10 @@
 There is no ledger. A transcript is already handled exactly when the diary
 holds an entry for it whose end time is not older than the transcript's last
 timestamp, or when it ended before relay was adopted here (see
-session_epoch). SessionStart and the Stop hook both call pending_sessions()
-so they can never disagree about what is outstanding.
+session_epoch). SessionStart and the manual skill both call
+pending_sessions() so they can never disagree about what is outstanding —
+the skill additionally names the session it is running in, which by
+definition has not ended yet.
 """
 import datetime
 import os
@@ -92,11 +94,17 @@ def _diary_index(cwd):
     return newest, collided, broken_tokens
 
 
-def pending_sessions(cwd, now=None, limit=MAX_JOBS):
+def pending_sessions(cwd, now=None, limit=MAX_JOBS, force_sid=None):
     """Transcripts needing a diary entry, newest first, capped at `limit`.
 
     Cheap tests run first: reading a transcript in full is the one expensive
     step here and only the surviving candidates pay for it.
+
+    `force_sid` waives the "has it ended" test for one session, and only
+    that one: it is how the manual skill records the session running it,
+    which is still being written to and can never satisfy the idle rule.
+    Every other transcript keeps the rule, so a window open in parallel is
+    never summarised while its user is still typing into it.
     """
     now = local_now() if now is None else now
     # Drawn before anything can return early. A project whose transcripts
@@ -128,7 +136,7 @@ def pending_sessions(cwd, now=None, limit=MAX_JOBS):
         if epoch is not None and end <= epoch:
             before_epoch += 1
             continue
-        if not _ended(cwd, sid, path, end, now):
+        if sid != force_sid and not _ended(cwd, sid, path, end, now):
             continue
         if sid8 in collided:
             log("detect", f"skip {sid8}: duplicate heading in one diary file")

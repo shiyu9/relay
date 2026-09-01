@@ -22,7 +22,7 @@ import relay_common  # noqa: E402
 import relay_detect  # noqa: E402
 import relay_jobs  # noqa: E402
 import relay_prompts  # noqa: E402
-import relay_stop_hook  # noqa: E402
+import relay_record  # noqa: E402
 import session_end_hook  # noqa: E402
 import session_start_hook  # noqa: E402
 
@@ -52,14 +52,6 @@ class PipelineCase(RelayCase):
              contextlib.redirect_stdout(out):
             session_start_hook.main()
         return out.getvalue()
-
-    def stop_hook(self, stop_hook_active=False):
-        payload = {"cwd": self.cwd, "stop_hook_active": stop_hook_active}
-        out = io.StringIO()
-        with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
-             contextlib.redirect_stdout(out):
-            relay_stop_hook.main()
-        return out.getvalue().strip()
 
     def record(self, sid, body="### done\n- something"):
         self.put_inbox(sid, f"===DIARY===\n{body}\n===PITFALLS===\n"
@@ -672,39 +664,6 @@ class TestKnowledgeDatesComeFromPython(PipelineCase):
         self.assertIn("日付は Python が付けます", relay_prompts.RECORD)
 
 
-class TestStopHook(PipelineCase):
-    """Feature: Stop hook（記録の取りこぼしの再促し）"""
-
-    def _unrecorded(self):
-        self.make_transcript(SID, dt(2026, 8, 27, 19, 11),
-                             dt(2026, 8, 27, 22, 30), mtime=time.time() - 7200)
-
-    def test_it_asks_again_when_something_is_unrecorded(self):
-        self._unrecorded()
-        payload = json.loads(self.stop_hook())
-        self.assertEqual(payload["decision"], "block")
-        self.assertIn("未記録", payload["reason"])
-
-    def test_it_stays_quiet_about_the_running_session(self):
-        end = relay_common.local_now() - datetime.timedelta(minutes=5)
-        self.make_transcript(SID, end - datetime.timedelta(hours=1), end)
-        self.assertEqual(self.stop_hook(), "")
-
-    def test_it_never_fires_on_the_turn_its_own_block_restarted(self):
-        self._unrecorded()
-        self.assertEqual(self.stop_hook(stop_hook_active=True), "")
-
-    def test_the_cooldown_silences_a_repeat(self):
-        self._unrecorded()
-        self.assertNotEqual(self.stop_hook(), "")
-        self.assertEqual(self.stop_hook(), "")
-
-    def test_a_disabled_project_is_left_alone(self):
-        self._unrecorded()
-        with mock.patch.dict(os.environ, {"RELAY_DISABLED": "1"}):
-            self.assertEqual(self.stop_hook(), "")
-
-
 class TestSessionEndMarker(PipelineCase):
     """The SessionEnd hook does exactly one thing."""
 
@@ -815,90 +774,6 @@ class TestTheAdoptionCutoff(PipelineCase):
         with mock.patch.dict(os.environ, {"RELAY_EPOCH": "2026-08-20"}):
             self.assertEqual(self._sid8s(), [])
 
-    def test_the_stop_hook_reads_the_same_line(self):
-        self._old_transcript()
-        self.set_epoch(dt(2026, 8, 20))
-        self.assertEqual(self.stop_hook(), "")
-
-
-class TestTheNudgePointsAtWorkThatIsLeft(PipelineCase):
-    """Feature: Stop hook が指すジョブ"""
-
-    def _unrecorded(self, sid=SID, day=27):
-        return self.make_transcript(sid, dt(2026, 8, day, 19, 11),
-                                    dt(2026, 8, day, 22, 30),
-                                    mtime=time.time() - 7200)
-
-    def _hand_out(self):
-        """What SessionStart does: jobs for whatever is pending right now."""
-        relay_jobs.write_jobs(self.cwd, relay_detect.pending_sessions(self.cwd))
-
-    def _age(self, sid, secs):
-        p = relay_common.jobs_dir(self.cwd) / f"{sid}.md"
-        when = time.time() - secs
-        os.utime(p, (when, when))
-        return p
-
-    def test_the_nudge_carries_the_procedure_not_a_directory(self):
-        self._unrecorded()
-        reason = json.loads(self.stop_hook())["reason"]
-        self.assertIn(SID8, reason)
-        self.assertIn("relay_apply.py", reason)
-        self.assertIn("--cwd", reason)
-        self.assertNotIn("{jobs_dir}", relay_prompts.STOP_NUDGE)
-
-    def test_the_job_body_still_stays_out_of_the_nudge(self):
-        self._unrecorded()
-        self.assertNotIn("===DIARY===", json.loads(self.stop_hook())["reason"])
-
-    def test_the_rebuilt_jobs_name_what_is_outstanding_now(self):
-        self._unrecorded(SID, day=27)
-        self._unrecorded(OTHER, day=26)
-        self._hand_out()
-        self.record(OTHER)
-        self._age(SID, relay_common.JOB_GRACE_SECS + 60)
-        reason = json.loads(self.stop_hook())["reason"]
-        self.assertIn(SID8, reason)
-        self.assertNotIn(OTHER[:8], reason)
-        self.assertIn("1 件", reason)
-
-    def test_a_job_handed_out_moments_ago_buys_silence(self):
-        self._unrecorded()
-        self._hand_out()
-        self.assertEqual(self.stop_hook(), "")
-
-    def test_three_jobs_in_flight_leave_nothing_to_nudge_about(self):
-        self._unrecorded(SID, day=27)
-        self._unrecorded(OTHER, day=26)
-        self._hand_out()
-        self.assertEqual(self.stop_hook(), "")
-
-    def test_silence_ends_once_the_job_is_older_than_the_grace(self):
-        self._unrecorded()
-        self._hand_out()
-        self._age(SID, relay_common.JOB_GRACE_SECS + 60)
-        self.assertNotEqual(self.stop_hook(), "")
-
-    def test_the_in_flight_question_is_asked_before_the_jobs_are_rebuilt(self):
-        self._unrecorded()
-        self._hand_out()
-        job = self._age(SID, relay_common.JOB_GRACE_SECS + 60)
-        aged = os.path.getmtime(job)
-        self.assertNotEqual(self.stop_hook(), "")
-        self.assertGreater(os.path.getmtime(job), aged)
-
-    def test_a_job_in_flight_is_not_touched_by_a_nudge_about_another(self):
-        self._unrecorded(SID, day=27)
-        self._unrecorded(OTHER, day=26)
-        self._hand_out()
-        fresh = os.path.getmtime(
-            relay_common.jobs_dir(self.cwd) / f"{OTHER}.md")
-        self._age(SID, relay_common.JOB_GRACE_SECS + 60)
-        self.assertNotEqual(self.stop_hook(), "")
-        self.assertEqual(
-            os.path.getmtime(relay_common.jobs_dir(self.cwd) / f"{OTHER}.md"),
-            fresh)
-
 
 TASKS = """\
 # tasks
@@ -999,6 +874,99 @@ class TestTheWholeStrikeOffPath(PipelineCase):
         self.put_inbox("overwrite", "===TASKS_DONE===\n===END===\n")
         self.apply()
         self.assertIn(IPAD, self.start_hook())
+
+
+TOKEN = "20260902-0130-k3v9"
+
+
+class TestTheManualEntryPoint(PipelineCase):
+    """The skill records the session it is running in, and only that one."""
+
+    def run_skill(self, token=None):
+        argv = ["relay_record.py", "--cwd", self.cwd]
+        if token is not None:
+            argv += ["--self", token]
+        out = io.StringIO()
+        with mock.patch.object(sys, "argv", argv), \
+             contextlib.redirect_stdout(out):
+            relay_record.main()
+        return out.getvalue()
+
+    def live(self, sid=SID, token=None):
+        """A transcript still being written to — no marker, freshly touched."""
+        end = relay_common.local_now() - datetime.timedelta(minutes=2)
+        p = self.make_transcript(sid, end - datetime.timedelta(hours=1), end)
+        if token:
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(token + "\n")
+        return p
+
+    def test_the_session_running_it_is_recorded_too(self):
+        self.live(SID, TOKEN)
+        # Proof the idle rule would otherwise have excluded it.
+        self.assertEqual(relay_detect.pending_sessions(self.cwd), [])
+        out = self.run_skill(TOKEN)
+        self.assertIn(SID8, out)
+        self.assertIn("いま動いているこのセッションを含む", out)
+
+    def test_a_parallel_window_is_still_left_alone(self):
+        self.live(SID, TOKEN)
+        self.live(OTHER)  # somebody else's session, still being typed into
+        out = self.run_skill(TOKEN)
+        self.assertIn(SID8, out)
+        self.assertNotIn(OTHER[:8], out)
+
+    def test_an_unresolvable_token_says_so_and_records_the_rest(self):
+        self.live(SID, TOKEN)
+        self.make_transcript(OTHER, dt(2026, 8, 27, 19, 11),
+                             dt(2026, 8, 27, 22, 30), mtime=time.time() - 7200)
+        out = self.run_skill("20260902-9999-zzzz")
+        self.assertIn("特定できませんでした", out)
+        self.assertIn(OTHER[:8], out)   # the backlog is still worth doing
+        self.assertNotIn(SID8, out)     # but we did not guess at ourselves
+
+    def test_two_matches_name_neither(self):
+        self.live(SID, TOKEN)
+        self.live(OTHER, TOKEN)
+        out = self.run_skill(TOKEN)
+        self.assertIn("特定できませんでした", out)
+        self.assertIn("記録するセッションはありません", out)
+
+    def test_nothing_outstanding_says_so_plainly(self):
+        self.assertIn("記録するセッションはありません", self.run_skill(TOKEN))
+
+    def test_it_hands_over_the_same_jobs_startup_would(self):
+        self.live(SID, TOKEN)
+        out = self.run_skill(TOKEN)
+        for fragment in ("general-purpose", "relay_apply.py", "merge_due",
+                         "Blocked by classifier"):
+            self.assertIn(fragment, out)
+
+    def test_a_disabled_project_is_left_alone(self):
+        self.live(SID, TOKEN)
+        with mock.patch.dict(os.environ, {"RELAY_DISABLED": "1"}):
+            out = self.run_skill(TOKEN)
+        self.assertIn("無効です", out)
+        self.assertNotIn(SID8, out)
+
+    def test_a_project_out_of_scope_is_left_alone(self):
+        self.live(SID, TOKEN)
+        with mock.patch.dict(os.environ, {"RELAY_SCOPE": str(self.home / "no")}):
+            out = self.run_skill(TOKEN)
+        self.assertIn("RELAY_SCOPE", out)
+        self.assertNotIn(SID8, out)
+
+
+class TestTheSkillAndTheHookAgree(PipelineCase):
+    """Two ways in, one procedure: the framing differs, the steps do not."""
+
+    def test_the_steps_are_one_string(self):
+        self.assertIn(relay_prompts._PROCEDURE, relay_prompts.TODO)
+        self.assertIn(relay_prompts._PROCEDURE, relay_prompts.MANUAL)
+
+    def test_only_the_framing_differs(self):
+        self.assertIn("ユーザーへの最初の応答より前に", relay_prompts.TODO)
+        self.assertNotIn("ユーザーへの最初の応答より前に", relay_prompts.MANUAL)
 
 
 if __name__ == "__main__":

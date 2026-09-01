@@ -407,28 +407,90 @@ class TestAdoptionCutoff(ApplyCase):
         self.assertEqual(self._pending(), [])
 
 
-class TestInFlightJobs(ApplyCase):
-    def _job(self, sid=SID):
-        jobs = relay_common.jobs_dir(self.cwd)
-        jobs.mkdir(parents=True, exist_ok=True)
-        p = jobs / f"{sid}.md"
-        p.write_text("x", encoding="utf-8")
+# --- 12 naming the session that is running ---------------------------------
+
+OTHER = "bd0da51f-225a-42c2-a745-58483d649f36"
+TOKEN = "20260902-0130-k3v9"
+
+
+class TestFindingThisSession(ApplyCase):
+    """The manual entry point names itself, or it refuses to act."""
+
+    def _tx(self, sid, text, age=0):
+        tdir = relay_common.transcripts_dir(self.cwd)
+        tdir.mkdir(parents=True, exist_ok=True)
+        p = tdir / f"{sid}.jsonl"
+        p.write_text(text, encoding="utf-8")
+        if age:
+            when = time.time() - age
+            os.utime(p, (when, when))
         return p
 
-    def test_a_session_with_no_job_file_is_never_in_flight(self):
-        self.assertEqual(relay_common.jobs_in_flight(self.cwd, [SID]), set())
+    def test_one_recent_transcript_holding_the_token_is_us(self):
+        self._tx(SID, f'{{"x":"{TOKEN}"}}\n')
+        self.assertEqual(relay_common.find_self(self.cwd, TOKEN), SID)
 
-    def test_the_grace_is_exclusive_at_its_own_edge(self):
-        p = self._job()
-        now = time.time()
-        for age, expected in ((relay_common.JOB_GRACE_SECS, set()),
-                              (relay_common.JOB_GRACE_SECS - 1, {SID})):
-            os.utime(p, (now - age, now - age))
-            self.assertEqual(
-                relay_common.jobs_in_flight(self.cwd, [SID], now), expected)
+    def test_two_live_matches_refuse_rather_than_guess(self):
+        self._tx(SID, TOKEN)
+        self._tx(OTHER, TOKEN)
+        self.assertIsNone(relay_common.find_self(self.cwd, TOKEN))
 
-    def test_an_empty_list_asks_nothing_of_the_filesystem(self):
-        self.assertEqual(relay_common.jobs_in_flight(self.cwd, []), set())
+    def test_a_match_outside_the_window_does_not_count(self):
+        self._tx(SID, TOKEN, age=relay_common.SELF_WINDOW_SECS + 60)
+        self.assertIsNone(relay_common.find_self(self.cwd, TOKEN))
+
+    def test_a_stale_copy_leaves_the_live_one_unambiguous(self):
+        self._tx(SID, TOKEN)
+        self._tx(OTHER, TOKEN, age=relay_common.SELF_WINDOW_SECS + 60)
+        self.assertEqual(relay_common.find_self(self.cwd, TOKEN), SID)
+
+    def test_an_empty_token_never_matches(self):
+        self._tx(SID, TOKEN)
+        for empty in ("", None):
+            self.assertIsNone(relay_common.find_self(self.cwd, empty))
+
+    def test_a_token_nobody_wrote_matches_nothing(self):
+        self._tx(SID, TOKEN)
+        self.assertIsNone(relay_common.find_self(self.cwd, "20260902-9999-zzzz"))
+
+
+# --- 13 sessions that held nothing ----------------------------------------
+
+class TestNothingToRecordIsRemembered(ApplyCase):
+    """A session looked at and found empty must not be offered forever."""
+
+    def setUp(self):
+        super().setUp()
+        self.ended_transcript()
+        self.put_inbox(SID, "NOTHING_TO_RECORD\n")
+
+    def test_the_verdict_reaches_the_diary(self):
+        self.assertEqual(self.summary()["thin"], "1")
+        body = self.read_diary("2026-08-27")
+        self.assertIn(SID8, body)
+        self.assertIn(relay_common.THIN_MARK, body)
+
+    def test_the_session_stops_being_a_candidate(self):
+        self.assertEqual(len(relay_detect.pending_sessions(self.cwd)), 1)
+        self.apply()
+        self.assertEqual(relay_detect.pending_sessions(self.cwd), [])
+
+    def test_it_does_not_take_a_slot_in_the_injection(self):
+        self.apply()
+        self.assertEqual(relay_common.recent_entries(self.cwd), [])
+
+    def test_a_real_entry_beside_it_still_shows(self):
+        self.apply()
+        self.write_diary("2026-08-28", "## S1 09:00-10:00 (bd0da51f)\n"
+                                       "### done\n- 本物の記録\n")
+        kept = [e.sid8 for e in relay_common.recent_entries(self.cwd)]
+        self.assertEqual(kept, ["bd0da51f"])
+
+    def test_growth_makes_it_a_candidate_again(self):
+        self.apply()
+        self.make_transcript(SID, dt(2026, 8, 27, 19, 11),
+                             dt(2026, 8, 27, 23, 59), mtime=PAST)
+        self.assertEqual(len(relay_detect.pending_sessions(self.cwd)), 1)
 
 
 # --- 9 striking tasks off tasks.md ---------------------------------------

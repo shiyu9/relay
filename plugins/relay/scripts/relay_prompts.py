@@ -254,11 +254,7 @@ current.md（現在地）と decided.md（見送りと再開条件）はレコ�
 読む対象であり、セッション中に手で編集しない（次の記録で上書きされる）。
 """
 
-TODO = """
-# relay: 未記録のセッションが {n} 件ある
-
-**ユーザーへの最初の応答より前に**、次の手順で記録を済ませること。手順の外のことはしない。
-
+_PROCEDURE = """
 1. 下のジョブを Task ツールで実行する（サブエージェントの種類は `general-purpose`、\
 モデルは `{model}`）。**複数あるときは全部を同じメッセージでまとめて呼ぶこと**——\
 互いに独立なので並行して構わない。
@@ -289,15 +285,20 @@ auto mode の分類器に `Blocked by classifier` で拒否される（実測）
 終わったら「relay: 記録しました」と1行だけ添えて、本来の作業に移ること。
 """
 
-# The procedure follows this line, rebuilt for the sessions outstanding right
-# now. Pointing back at the one printed at startup was wrong twice over: it
-# names the transcripts that were pending at startup (already recorded, by
-# now, if the session did its job), and it may have fallen out of context
-# entirely by the time this fires.
-STOP_NUDGE = (
-    "relay: 未記録のセッションが {n} 件残っています。**下の手順をいま実行してください。**"
-    "セッション開始時に注入された手順は対象が古いので使わず、下のものを使うこと。"
-    "記録が済むまで、この促しは30分おきに出ます。"
-    "実行したあとの締めの発言は、直前にユーザーへ返した本文を置き換えないこと。"
-    "1〜2行の追記に留めてください。\n"
-)
+# Two ways in, one procedure. SessionStart finds a backlog and asks for it to
+# be cleared before anything else happens; the skill is asked for by name and
+# records the session it is running in as well. Only the framing differs, and
+# keeping the steps in one string is what stops the two from drifting apart —
+# they hand the model the same jobs and the same apply command.
+
+TODO = """
+# relay: 未記録のセッションが {n} 件ある
+
+**ユーザーへの最初の応答より前に**、次の手順で記録を済ませること。手順の外のことはしない。
+""" + _PROCEDURE
+
+MANUAL = """
+# relay: 記録するセッションが {n} 件ある（いま動いているこのセッションを含む）
+
+次の手順で記録する。手順の外のことはしない。
+""" + _PROCEDURE

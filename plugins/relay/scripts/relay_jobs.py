@@ -1,12 +1,11 @@
 """The recording procedure: the job files, and the notice that points at them.
 
-SessionStart builds these when it finds unrecorded transcripts. The Stop hook
-builds them again whenever it has to ask a second time, and that repetition is
-the point: the jobs written at startup name the transcripts that were pending
-at startup. A session that recorded those and then worked for another hour has
-a jobs directory holding instructions for sessions that are already in the
-diary, so a nudge that merely points at the directory sends the model to redo
-finished work while the real backlog stays where it is.
+SessionStart builds these when it finds unrecorded transcripts, and the manual
+skill builds them again for whatever is outstanding at the moment it is asked.
+Rebuilding rather than pointing at the directory is the point: the jobs written
+at startup name the transcripts that were pending at startup, so a session that
+recorded those and then worked for another hour has a jobs directory full of
+instructions for sessions that are already in the diary.
 """
 import os
 import pathlib
@@ -26,8 +25,12 @@ DEFAULT_MODEL = "claude-haiku-4-5"
 SCRIPTS = pathlib.Path(__file__).resolve().parent
 
 
-def write_jobs(cwd, pending, here=SCRIPTS):
-    """Write the job bodies and return the notice describing how to run them."""
+def write_jobs(cwd, pending, here=SCRIPTS, template=None):
+    """Write the job bodies and return the notice describing how to run them.
+
+    `template` picks the framing (startup's backlog notice or the skill's),
+    never the steps: both callers hand the model the same jobs.
+    """
     jobs = jobs_dir(cwd)
     jobs.mkdir(parents=True, exist_ok=True)
     inbox = inbox_dir(cwd)
@@ -84,7 +87,7 @@ def write_jobs(cwd, pending, here=SCRIPTS):
 
     apply_cmd = 'python "{}" --cwd "{}"'.format(
         (pathlib.Path(here) / "relay_apply.py").as_posix(), project)
-    return relay_prompts.TODO.format(
+    return (template or relay_prompts.TODO).format(
         n=len(pending), model=os.environ.get("RELAY_MODEL", DEFAULT_MODEL),
         jobs="".join(lines), apply=apply_cmd,
         overwrite_call=relay_prompts.CALL_BLOCK.format(
