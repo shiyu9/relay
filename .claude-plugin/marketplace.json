@@ -11,7 +11,7 @@
       "name": "relay",
       "source": "./plugins/relay",
       "description": "会話ログから日記・ナレッジ・現在地を書き起こし、次のセッション開始時に注入する。記録はセッション自身のサブエージェントが行うのでヘッドレスCLIを必要としない。",
-      "version": "0.7.0",
+      "version": "0.8.0",
       "author": {
         "name": "Anlan"
       }
