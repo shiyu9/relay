@@ -718,5 +718,82 @@ class TestTheCliDecidesWhenNotWhether(ApplyCase):
             self.assertEqual(relay_common.claude_cli(), r"C:\bin\claude.exe")
 
 
+# --- 15 condensing the transcript before it is read ----------------------
+
+class TestCondensing(ApplyCase):
+    """"Read all of it" is only a fair request against something small."""
+
+    def build(self, turns=3, result_len=4000, noise=True):
+        """A transcript shaped like the real ones: mostly metadata and results."""
+        tdir = relay_common.transcripts_dir(self.cwd)
+        tdir.mkdir(parents=True, exist_ok=True)
+        rows = []
+        for i in range(turns):
+            meta = ({"uuid": f"u{i}" * 20, "parentUuid": f"p{i}" * 20,
+                     "timestamp": "2026-08-27T19:11:00.000Z", "cwd": self.cwd}
+                    if noise else {})
+            rows.append({**meta, "type": "user", "message": {
+                "content": [{"type": "text", "text": f"ユーザーの発言 {i}"}]}})
+            rows.append({**meta, "type": "assistant", "message": {"content": [
+                {"type": "thinking", "thinking": f"考えたこと {i}"},
+                {"type": "text", "text": f"応答 {i}"},
+                {"type": "tool_use", "name": "Bash", "input": {"command": "x" * 2000}},
+            ]}})
+            rows.append({**meta, "type": "user", "message": {"content": [
+                {"type": "tool_result", "content": "R" * result_len}]}})
+        src = tdir / f"{SID}.jsonl"
+        src.write_text("\n".join(json.dumps(r, ensure_ascii=False)
+                                 for r in rows) + "\n", encoding="utf-8")
+        dst = relay_common.condensed_dir(self.cwd) / f"{SID}.md"
+        return src, relay_common.condense_transcript(src, dst)
+
+    def test_every_spoken_line_survives(self):
+        """The whole point: nothing a person said may be dropped."""
+        src, dst = self.build(turns=5)
+        text = relay_common.read_text(dst)
+        for i in range(5):
+            self.assertIn(f"ユーザーの発言 {i}", text)
+            self.assertIn(f"応答 {i}", text)
+
+    def test_thinking_survives_because_decisions_are_built_from_it(self):
+        src, dst = self.build()
+        self.assertIn("考えたこと 0", relay_common.read_text(dst))
+
+    def test_tool_results_are_clipped_not_dropped(self):
+        src, dst = self.build(result_len=4000)
+        text = relay_common.read_text(dst)
+        self.assertIn("[result] RRR", text)
+        self.assertIn("文字省略", text)
+        self.assertNotIn("R" * 1000, text)
+
+    def test_the_metadata_nobody_reads_is_gone(self):
+        src, dst = self.build()
+        text = relay_common.read_text(dst)
+        self.assertNotIn("parentUuid", text)
+        self.assertNotIn("uuid", text)
+        self.assertNotIn("2026-08-27T19:11", text)
+
+    def test_it_shrinks_by_an_order_of_magnitude(self):
+        """Measured on a real 5321 KB transcript: 737 KB, 14%."""
+        src, dst = self.build(turns=40, result_len=8000)
+        ratio = dst.stat().st_size / src.stat().st_size
+        self.assertLess(ratio, 0.30, f"縮約が効いていない（{ratio:.0%}）")
+
+    def test_a_half_written_line_is_stepped_over(self):
+        src, dst = self.build()
+        src.write_text("{not json\n" + relay_common.read_text(src),
+                       encoding="utf-8")
+        again = relay_common.condense_transcript(
+            src, relay_common.condensed_dir(self.cwd) / f"{SID}.md")
+        self.assertIn("ユーザーの発言 0", relay_common.read_text(again))
+
+    def test_the_speakers_are_marked_in_order(self):
+        src, dst = self.build(turns=2)
+        heads = [l for l in relay_common.read_text(dst).splitlines()
+                 if l.startswith("### ")]
+        self.assertEqual(heads[:4], ["### user", "### assistant", "### user",
+                                     "### user"])
+
+
 if __name__ == "__main__":
     unittest.main()

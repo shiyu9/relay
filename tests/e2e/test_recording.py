@@ -697,6 +697,7 @@ class TestKnowledgeDatesComeFromPython(PipelineCase):
     def test_the_job_body_needs_only_what_the_hook_hands_it(self):
         """`{date}` を書き戻すと hook の format が KeyError で黙って落ちる。"""
         body = relay_prompts.RECORD.format(out="o", transcript="t",
+                                          condensed="c",
                                            pitfalls="p", workflow="w")
         self.assertIn("===DIARY===", body)
 
@@ -886,11 +887,29 @@ class TestTheStrikeOffJobHasWhatItNeeds(PipelineCase):
         return relay_common.read_text(
             relay_common.jobs_dir(self.cwd) / "overwrite.md")
 
+    def job_body_for_record(self):
+        return relay_common.read_text(
+            relay_common.jobs_dir(self.cwd) / f"{SID}.md")
+
     def test_the_items_are_pasted_into_the_job(self):
         self.assertIn(IPAD, self.job_body())
 
     def test_the_job_asks_for_the_section(self):
         self.assertIn("===TASKS_DONE===", self.job_body())
+
+    def test_the_job_points_at_the_condensed_reading(self):
+        """Asked to read all of it, the recorder needs something it can."""
+        body = self.job_body_for_record()
+        self.assertIn("condensed", body)
+        self.assertIn("最初から最後まで全部読むこと", body)
+
+    def test_the_job_still_carries_the_original(self):
+        """Clipping is only safe while the full text is reachable."""
+        self.assertIn(".jsonl", self.job_body_for_record())
+
+    def test_nothing_tells_it_to_favour_the_end(self):
+        """The one line that caused two sessions to be summarised wrong."""
+        self.assertNotIn("末尾を優先", self.job_body_for_record())
 
     def test_the_job_names_the_diary_as_the_only_ground(self):
         self.assertIn("日記の `done`", self.job_body())

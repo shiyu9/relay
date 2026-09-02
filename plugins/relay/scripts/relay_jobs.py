@@ -12,6 +12,8 @@ import pathlib
 
 import relay_prompts
 from relay_common import (
+    condense_transcript,
+    condensed_dir,
     inbox_dir,
     jobs_dir,
     knowledge_path,
@@ -47,8 +49,14 @@ def write_jobs(cwd, pending, here=SCRIPTS, template=None):
     for i, p in enumerate(pending, 1):
         job = jobs / f"{p.sid}.md"
         out = inbox / f"{p.sid}.txt"
+        # Built here, once per job: the recorder is asked to read all of it,
+        # and that is only a reasonable request against the condensed form.
+        # The original path goes along too, for the clipped tool results.
+        condensed = condense_transcript(
+            p.path, condensed_dir(cwd) / f"{p.sid}.md")
         job.write_text(relay_prompts.RECORD.format(
             out=out.as_posix(), transcript=p.path.as_posix(),
+            condensed=condensed.as_posix(),
             pitfalls=pitfalls, workflow=workflow), encoding="utf-8")
         lines.append(relay_prompts.CALL_BLOCK.format(
             title=f"ジョブ {i}/{len(pending)}: {p.date} のセッション {p.sid8}",

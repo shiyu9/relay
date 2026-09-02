@@ -341,6 +341,70 @@ def tasks_path(cwd):
     return pathlib.Path(cwd) / "tasks.md"
 
 
+def condensed_dir(cwd):
+    """Where the readable form of a transcript is kept for the recorder."""
+    return relay_home() / "condensed" / sanitize_cwd(cwd)
+
+
+def _clip(value, limit):
+    text = value if isinstance(value, str) else json.dumps(value,
+                                                           ensure_ascii=False)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f" …[{len(text) - limit} 文字省略]"
+
+
+def condense_transcript(src, dst):
+    """Rewrite one transcript as the conversation, and nothing else.
+
+    Measured on a 5321 KB transcript: 63% of it is JSON the recorder never
+    reads — uuid, parentUuid, timestamps — and the actual spoken text is 3%.
+    Asked to summarise that, and told to favour the end when it is large,
+    the recorder read the end and nothing else: two sessions in a row lost
+    everything before their midpoint, and one of them wrote a `mistakes`
+    entry that was the opposite of what happened.
+
+    So the reading is made small enough that "read all of it" is a request
+    that can be honoured. The same file drops to 737 KB (14%) — the text
+    and the thinking verbatim, tool calls and their results clipped to a
+    few hundred characters, laid out as `### user` / `### assistant`.
+
+    The clipping is why the job also carries the original path: what is cut
+    here can still be fetched there, on the rare occasion it matters.
+    """
+    lines = []
+    for raw in read_text(src).splitlines():
+        try:
+            item = json.loads(raw)
+        except ValueError:
+            continue  # a half-written line is not worth failing over
+        role = item.get("type")
+        if role not in ("user", "assistant"):
+            continue
+        content = item.get("message", {}).get("content")
+        blocks = (content if isinstance(content, list)
+                  else [{"type": "text", "text": content or ""}])
+        parts = []
+        for b in blocks:
+            if not isinstance(b, dict):
+                continue
+            kind = b.get("type")
+            if kind == "text":
+                parts.append(b.get("text", ""))
+            elif kind == "thinking":
+                parts.append("[thinking] " + b.get("thinking", ""))
+            elif kind == "tool_use":
+                parts.append(f"[{b.get('name')}] " + _clip(b.get("input", {}), 300))
+            elif kind == "tool_result":
+                parts.append("[result] " + _clip(b.get("content", ""), 200))
+        body = "\n".join(p for p in parts if p).strip()
+        if body:
+            lines.append(f"### {role}\n{body}")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    write_atomic(dst, "\n\n".join(lines) + "\n")
+    return dst
+
+
 def running_dir(cwd):
     """Markers for recorders currently at work in this project."""
     return relay_home() / "running" / sanitize_cwd(cwd)
