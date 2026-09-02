@@ -23,6 +23,7 @@ import relay_detect  # noqa: E402
 import relay_jobs  # noqa: E402
 import relay_prompts  # noqa: E402
 import relay_record  # noqa: E402
+import relay_record_headless  # noqa: E402
 import relay_spawn  # noqa: E402
 import session_end_hook  # noqa: E402
 import user_prompt_hook  # noqa: E402
@@ -1105,6 +1106,56 @@ class TestSessionEndStartsTheRecorder(PipelineCase):
              mock.patch.object(relay_spawn, "start") as started:
             self.end_hook(SID)
         self.assertFalse(started.called)
+
+
+class TestTheRecorderDoesNotDisturbAnyone(PipelineCase):
+    """It works in the background, and it must not read itself."""
+
+    def run_one(self):
+        """Run the CLI step with subprocess.run captured."""
+        job = relay_common.jobs_dir(self.cwd) / "j.md"
+        job.parent.mkdir(parents=True, exist_ok=True)
+        job.write_text("body", encoding="utf-8")
+        finished = mock.Mock(returncode=0, stdout="===DIARY===")
+        with mock.patch.object(relay_record_headless.subprocess, "run",
+                               return_value=finished) as ran:
+            relay_record_headless.run_job(
+                "claude", "haiku", job,
+                relay_common.inbox_dir(self.cwd) / "j.txt")
+        return ran.call_args
+
+    def test_it_asks_windows_for_no_console(self):
+        """This process owns no console, so a console app is given a fresh
+        visible one. Observed: a terminal window appearing mid-recording."""
+        if os.name != "nt":
+            self.skipTest("Windows only")
+        self.assertEqual(self.run_one().kwargs.get("creationflags"),
+                         relay_spawn.CREATE_NO_WINDOW)
+
+    def test_relay_is_switched_off_inside_the_recorder(self):
+        """`claude` runs relay's hooks, so relay would otherwise read itself.
+
+        Observed twice over: SessionStart put its own notice into the
+        recorder's prompt, and the recorder's SessionEnd started a second
+        recorder, which started a third.
+        """
+        self.assertEqual(self.run_one().kwargs["env"].get("RELAY_DISABLED"), "1")
+
+    def test_the_api_key_is_dropped_by_default(self):
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-x"}):
+            env = self.run_one().kwargs["env"]
+        self.assertNotIn("ANTHROPIC_API_KEY", env)
+
+    def test_the_api_key_is_kept_when_asked(self):
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-x",
+                                          "RELAY_KEEP_API_KEY": "1"}):
+            env = self.run_one().kwargs["env"]
+        self.assertEqual(env.get("ANTHROPIC_API_KEY"), "sk-x")
+
+    def test_the_model_never_gets_a_way_to_write(self):
+        argv = self.run_one().args[0]
+        self.assertIn("--allowedTools", argv)
+        self.assertEqual(argv[argv.index("--allowedTools") + 1], "Read")
 
 
 class TestASessionOpenedMidRecording(PipelineCase):

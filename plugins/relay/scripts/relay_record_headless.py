@@ -34,6 +34,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import relay_apply
+import relay_spawn
 from relay_common import (
     acquire_lock,
     claude_cli,
@@ -91,13 +92,26 @@ def run_job(cli, model, job_path, out_path):
         # configuration, so a stale one makes every recorder die at 401
         # (2026-07-25). Removing it is the default; keeping it is opt-in.
         env.pop("ANTHROPIC_API_KEY", None)
+    # The recorder runs `claude`, and `claude` runs relay's own hooks. Without
+    # this, SessionStart fires *inside* the recorder and its notice ("1
+    # recorder still at work", "N sessions unrecorded") lands in the
+    # recorder's own prompt — observed. relay must not read itself.
+    env["RELAY_DISABLED"] = "1"
+
+    kw = {}
+    if os.name == "nt":
+        # This process was started with CREATE_NO_WINDOW and so owns no
+        # console. Windows hands a brand-new *visible* one to any console
+        # app it launches, which is how a terminal window popped up in the
+        # middle of a recording. Inherited silence has to be asked for.
+        kw["creationflags"] = relay_spawn.CREATE_NO_WINDOW
 
     try:
         p = subprocess.run(
             [cli, "-p", HEADLESS_PREFIX + body, "--model", model,
              "--allowedTools", "Read"],
             capture_output=True, text=True, encoding="utf-8",
-            errors="replace", env=env)
+            errors="replace", env=env, **kw)
     except OSError as e:
         log("rec", f"could not start the CLI: {e!r}")
         return False
