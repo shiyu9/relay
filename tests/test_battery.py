@@ -406,6 +406,13 @@ class TestAdoptionCutoff(ApplyCase):
         self.set_epoch(dt(2026, 8, 20))
         self.assertEqual(self._pending(), [])
 
+    def test_no_line_is_drawn_for_a_path_that_is_not_a_directory(self):
+        self.set_epoch(None)
+        mangled = self.cwd.replace(os.sep, "").replace("/", "")
+        self.assertIsNone(
+            relay_common.session_epoch(mangled, now=dt(2026, 8, 20)))
+        self.assertFalse(relay_common.epoch_path(mangled).exists())
+
 
 # --- 12 naming the session that is running ---------------------------------
 

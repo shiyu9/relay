@@ -259,6 +259,17 @@ def session_epoch(cwd, now=None):
                          "no cutoff applied")
         return stamp
 
+    # A line is only drawn for a directory that exists. A path that is not
+    # one was mangled on the way in — `C:\claude-projects\x` handed to a
+    # shell unquoted arrives as `C:claude-projectsx` (five such files turned
+    # up on 2026-09-01) — and a line filed under that name is one no project
+    # will ever read: debris that looks like a real cutoff. A directory that
+    # does not exist holds no transcripts, so refusing changes no verdict; it
+    # only swaps a silent orphan for a log line.
+    if not os.path.isdir(cwd):
+        log("epoch", f"{cwd!r} is not a directory; no line drawn")
+        return None
+
     stamp = local_now() if now is None else now
     try:
         write_atomic(path, stamp.isoformat(timespec="seconds") + "\n")

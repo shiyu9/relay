@@ -768,6 +768,16 @@ class TestTheAdoptionCutoff(PipelineCase):
             self.assertEqual(self._sid8s(), [SID8])
         self.assertEqual(self.read_epoch(), "2026-08-20T00:00:00")
 
+    def test_a_path_that_is_not_a_directory_gets_no_line(self):
+        """`C:\\claude-projects\\x` unquoted through a shell arrives as
+        `C:claude-projectsx`; a line filed under that name is debris."""
+        self.set_epoch(None)
+        mangled = self.cwd.replace(os.sep, "").replace("/", "")
+        self.assertFalse(os.path.isdir(mangled))
+        self.assertEqual(relay_detect.pending_sessions(mangled), [])
+        self.assertFalse(relay_common.epoch_path(mangled).exists())
+        self.assertFalse(relay_common.epoch_path(self.cwd).exists())
+
     def test_relay_epoch_overrides_the_file(self):
         self._old_transcript()
         self.set_epoch(dt(2026, 8, 1))
