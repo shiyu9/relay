@@ -23,7 +23,9 @@ import relay_detect  # noqa: E402
 import relay_jobs  # noqa: E402
 import relay_prompts  # noqa: E402
 import relay_record  # noqa: E402
+import relay_spawn  # noqa: E402
 import session_end_hook  # noqa: E402
+import user_prompt_hook  # noqa: E402
 import session_start_hook  # noqa: E402
 
 SID = "124c52dd-f17a-4ad0-8b34-f94bdf3609f1"
@@ -51,6 +53,35 @@ class PipelineCase(RelayCase):
         with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
              contextlib.redirect_stdout(out):
             session_start_hook.main()
+        return out.getvalue()
+
+    def end_hook(self, sid=SID):
+        payload = {"cwd": self.cwd, "session_id": sid, "reason": "exit"}
+        with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))):
+            session_end_hook.main()
+
+    def prompt_hook(self, sid="new"):
+        payload = {"cwd": self.cwd, "session_id": sid}
+        out = io.StringIO()
+        with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
+             contextlib.redirect_stdout(out):
+            user_prompt_hook.main()
+        return out.getvalue()
+
+    def run_record(self, token=None):
+        """What the startup notice now tells the session to run.
+
+        SessionStart used to print the procedure itself; it points at
+        relay_record instead, so anything that looks at a job body goes
+        through here rather than through the hook.
+        """
+        argv = ["relay_record.py", "--cwd", self.cwd]
+        if token is not None:
+            argv += ["--self", token]
+        out = io.StringIO()
+        with mock.patch.object(sys, "argv", argv), \
+             contextlib.redirect_stdout(out):
+            relay_record.main()
         return out.getvalue()
 
     def record(self, sid, body="### done\n- something"):
@@ -273,15 +304,27 @@ class TestDetection(PipelineCase):
                              mtime=time.time() - 7200)
         self.assertEqual(len(relay_detect.pending_sessions(self.cwd)), 1)
 
-    def test_the_procedure_never_depends_on_the_claude_cli(self):
+    def test_a_machine_without_the_cli_still_records(self):
+        """The CLI decides *when* a session is recorded, never *whether*.
+
+        SessionEnd hands the work to a headless `claude` when there is one,
+        which is what keeps current.md from being a session behind. With no
+        CLI on the machine it leaves the end marker and nothing else, and
+        the next startup picks the transcript up — the same path a session
+        whose SessionEnd never fired takes.
+        """
         self.make_transcript(SID, dt(2026, 8, 27, 19, 11),
                              dt(2026, 8, 27, 22, 30), mtime=time.time() - 7200)
-        with mock.patch.dict(os.environ, {"PATH": ""}):
-            notice = self.start_hook()
+        with mock.patch.object(relay_common.shutil, "which",
+                               return_value=None):
+            self.end_hook(SID)
+        # No recorder was started, so nothing is marked as being recorded.
+        self.assertEqual(relay_common.running_sids(self.cwd), set())
+        self.assertTrue((relay_common.ended_dir(self.cwd) / SID).exists())
+        # And the session is still on offer, through the in-session route.
+        notice = self.run_record()
+        self.assertIn(SID8, notice)
         self.assertIn("relay_apply.py", notice)
-        scripts = pathlib.Path(relay_common.__file__).parent
-        for f in scripts.glob("*.py"):
-            self.assertNotIn("shutil.which", relay_common.read_text(f))
 
 
 class TestWriteDeterminism(PipelineCase):
@@ -355,7 +398,7 @@ class TestOverwriteLayers(PipelineCase):
                          "## S1 09:00-10:00 (aaaaaaaa)\n### done\n- 昨日の話\n")
         self.make_transcript(SID, dt(2026, 8, 10, 9, 0), dt(2026, 8, 10, 11, 30),
                              mtime=time.time() - 7200)
-        self.start_hook()
+        self.run_record()
         job = relay_common.read_text(
             relay_common.jobs_dir(self.cwd) / "overwrite.md")
         self.assertIn("diary/2026-08-10.md", job)
@@ -466,7 +509,7 @@ class TestPruneCannotEraseNewBullets(PipelineCase):
         self.write_knowledge("workflow.md", "- [2026-01-01] 古い進め方\n")
         self.make_transcript(SID, dt(2026, 8, 27, 19, 11),
                              dt(2026, 8, 27, 22, 30), mtime=time.time() - 7200)
-        self.start_hook()   # prune.md はここで「古い罠」だけを埋め込む
+        self.run_record()   # prune.md はここで「古い罠」だけを埋め込む
 
     def prune_job(self):
         return relay_common.read_text(
@@ -578,7 +621,7 @@ class TestTheCallTheSessionMakes(PipelineCase):
         目的から始めて手順に番号を振り、各手順の道具と書き先1本を名指しした
         形で通った。
         """
-        notice = self.start_hook()
+        notice = self.run_record()
         body = self.block(notice)
         self.assertIn("手順:", body)
         self.assertIn("を Read で読む", body)
@@ -588,17 +631,17 @@ class TestTheCallTheSessionMakes(PipelineCase):
         self.assertEqual(notice.count("ここから ---"), 3)
 
     def test_the_call_names_the_job_the_transcript_and_the_one_file_written(self):
-        body = self.block(self.start_hook())
+        body = self.block(self.run_record())
         self.assertIn(f"{SID}.md", body)       # 指示書
         self.assertIn(f"{SID}.jsonl", body)    # 読む対象
         self.assertIn(f"{SID}.txt", body)      # 書き先。これ1本だけ
 
     def test_the_job_body_still_stays_out_of_the_notice(self):
-        self.assertNotIn("===DIARY===", self.start_hook())
+        self.assertNotIn("===DIARY===", self.run_record())
 
     def test_the_apply_command_is_one_command_with_nothing_chained_to_it(self):
         """`cd ... && python ...` も実測で1回拒否され、`cd` を外して通った。"""
-        notice = self.start_hook()
+        notice = self.run_record()
         line = next(l for l in notice.splitlines() if "relay_apply.py" in l)
         self.assertNotIn("cd ", line)
         self.assertNotIn("&&", line)
@@ -606,14 +649,14 @@ class TestTheCallTheSessionMakes(PipelineCase):
         self.assertIn("`cd` を前に付けない", notice)
 
     def test_a_refused_job_is_left_pending_instead_of_being_repeated(self):
-        notice = self.start_hook()
+        notice = self.run_record()
         self.assertIn("同じ呼び出しを繰り返さないこと", notice)
         # 拒否されても記録は失われない: 何も書かなければ次の起動でまた候補になる。
         self.assertEqual([p.sid for p in relay_detect.pending_sessions(self.cwd)],
                          [SID])
 
     def test_the_overwrite_and_merge_calls_are_printed_the_same_way(self):
-        notice = self.start_hook()
+        notice = self.run_record()
         self.assertIn("現在地テキストの作成", notice)
         self.assertIn("ナレッジ統合テキストの作成", notice)
         self.assertIn("overwrite.md", self.block(notice, 2))
@@ -827,7 +870,7 @@ class TestTheStrikeOffJobHasWhatItNeeds(PipelineCase):
         self.write_tasks(TASKS)
         self.make_transcript(SID, dt(2026, 8, 27, 19, 11),
                              dt(2026, 8, 27, 22, 30), mtime=time.time() - 7200)
-        self.start_hook()
+        self.run_record()
 
     def job_body(self):
         return relay_common.read_text(
@@ -843,7 +886,7 @@ class TestTheStrikeOffJobHasWhatItNeeds(PipelineCase):
         self.assertIn("日記の `done`", self.job_body())
 
     def test_the_call_keeps_tasks_read_only(self):
-        notice = self.start_hook()
+        notice = self.run_record()
         self.assertIn("`tasks.md` を含む他の", notice)
 
 
@@ -965,8 +1008,140 @@ class TestTheSkillAndTheHookAgree(PipelineCase):
         self.assertIn(relay_prompts._PROCEDURE, relay_prompts.MANUAL)
 
     def test_only_the_framing_differs(self):
-        self.assertIn("ユーザーへの最初の応答より前に", relay_prompts.TODO)
-        self.assertNotIn("ユーザーへの最初の応答より前に", relay_prompts.MANUAL)
+        self.assertIn("いま動いているこのセッションを含む", relay_prompts.MANUAL)
+        self.assertNotIn("いま動いているこのセッションを含む", relay_prompts.TODO)
+
+    def test_startup_says_what_it_is_about_to_do_before_doing_it(self):
+        """Recording takes minutes; going silent for them looks like a hang.
+
+        The user asked to be told first, so the notice has to put speaking
+        ahead of the command that does the work.
+        """
+        self.make_transcript(SID, dt(2026, 8, 27, 19, 11),
+                             dt(2026, 8, 27, 22, 30), mtime=time.time() - 7200)
+        out = self.start_hook()
+        self.assertLess(out.index("記録してから始めます"),
+                        out.index("relay_record.py"))
+
+
+class TestSessionEndStartsTheRecorder(PipelineCase):
+    """With a CLI, the recording happens before the next session opens."""
+
+    def setUp(self):
+        super().setUp()
+        self.ended_transcript = self.make_transcript(
+            SID, dt(2026, 8, 27, 19, 11), dt(2026, 8, 27, 22, 30),
+            mtime=time.time() - 7200)
+
+    def end_with_cli(self, cli=r"C:\bin\claude.exe", pid=4321):
+        with mock.patch.object(relay_common.shutil, "which", return_value=cli), \
+             mock.patch.object(relay_spawn, "start",
+                               return_value=(pid, "reparented")) as started:
+            self.end_hook(SID)
+        return started
+
+    def test_it_starts_a_recorder_and_says_which_session(self):
+        started = self.end_with_cli()
+        argv = started.call_args[0][0]
+        self.assertIn("relay_record_headless.py", " ".join(argv))
+        self.assertIn(SID, argv)
+        self.assertIn(self.cwd, argv)
+
+    def test_the_marker_exists_before_the_next_session_can_open(self):
+        """Written by the hook, not the recorder.
+
+        The next session may start while the recorder is still getting off
+        the ground; a marker written by the recorder itself would be too
+        late to stop that session recording the same transcript.
+        """
+        self.end_with_cli()
+        self.assertIn(SID, relay_common.running_sids(self.cwd))
+
+    def test_the_end_marker_is_written_either_way(self):
+        self.end_with_cli()
+        self.assertTrue((relay_common.ended_dir(self.cwd) / SID).exists())
+
+    def test_a_recorder_that_will_not_start_leaves_no_marker(self):
+        with mock.patch.object(relay_common.shutil, "which",
+                               return_value=r"C:\bin\claude.exe"), \
+             mock.patch.object(relay_spawn, "start",
+                               return_value=(None, "failed: no")):
+            self.end_hook(SID)
+        self.assertEqual(relay_common.running_sids(self.cwd), set())
+        # Still on offer through the startup path, which is the point.
+        self.assertIn(SID8, self.run_record())
+
+    def test_a_disabled_project_starts_nothing(self):
+        with mock.patch.dict(os.environ, {"RELAY_DISABLED": "1"}), \
+             mock.patch.object(relay_spawn, "start") as started:
+            self.end_hook(SID)
+        self.assertFalse(started.called)
+
+
+class TestASessionOpenedMidRecording(PipelineCase):
+    """What the next session is told while the previous one is being written."""
+
+    def setUp(self):
+        super().setUp()
+        self.make_transcript(SID, dt(2026, 8, 27, 19, 11),
+                             dt(2026, 8, 27, 22, 30), mtime=time.time() - 7200)
+        self.write_knowledge("current.md", "いまここ")
+        relay_common.mark_running(self.cwd, SID, pid=4321)
+
+    def test_the_reader_is_told_the_page_is_incomplete(self):
+        """Never hand over a stale current.md without saying so."""
+        out = self.start_hook()
+        self.assertIn("記録中", out)
+        self.assertIn("まだ入っていない", out)
+        self.assertIn(SID8, out)
+
+    def test_the_session_is_not_offered_for_recording_again(self):
+        self.assertNotIn("relay_record.py", self.start_hook())
+
+    def test_a_watch_is_left_so_the_wait_can_be_ended(self):
+        self.start_hook()
+        watch = relay_common.notified_dir(self.cwd) / "new.watch"
+        self.assertEqual(relay_common.read_text(watch).split(), [SID])
+
+
+class TestTheEndOfTheWaitIsAnnounced(PipelineCase):
+    """The one place relay speaks mid-session, and it speaks once."""
+
+    def setUp(self):
+        super().setUp()
+        relay_common.mark_running(self.cwd, SID, pid=4321)
+        self.start_hook()          # leaves the watch for session "new"
+
+    def test_nothing_is_said_while_the_recorder_is_working(self):
+        self.assertEqual(self.prompt_hook(), "")
+
+    def test_one_line_when_the_recording_lands(self):
+        relay_common.clear_running(self.cwd, SID)
+        out = self.prompt_hook()
+        self.assertIn("記録が完了", out)
+        self.assertIn(SID8, out)
+        self.assertIn("current.md", out)
+
+    def test_and_never_again_after_that(self):
+        relay_common.clear_running(self.cwd, SID)
+        self.assertNotEqual(self.prompt_hook(), "")
+        self.assertEqual(self.prompt_hook(), "")
+        self.assertEqual(self.prompt_hook(), "")
+
+    def test_a_session_that_left_no_watch_is_never_spoken_to(self):
+        relay_common.clear_running(self.cwd, SID)
+        self.assertEqual(self.prompt_hook(sid="someone-else"), "")
+
+    def test_the_watch_does_not_reach_another_project(self):
+        other = str(pathlib.Path(self.cwd).parent / "other")
+        pathlib.Path(other).mkdir(parents=True, exist_ok=True)
+        relay_common.clear_running(self.cwd, SID)
+        out = io.StringIO()
+        payload = {"cwd": other, "session_id": "new"}
+        with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
+             contextlib.redirect_stdout(out):
+            user_prompt_hook.main()
+        self.assertEqual(out.getvalue(), "")
 
 
 if __name__ == "__main__":

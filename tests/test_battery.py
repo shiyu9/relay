@@ -626,5 +626,90 @@ class TestStruckItemsStayRecoverable(TasksCase):
         self.assertNotIn(relay_common.TASKS_DONE_HEADING, headings)
 
 
+# --- 14 recorders running outside the session ----------------------------
+
+class TestRunningMarkers(ApplyCase):
+    """The state the diary cannot hold: a recording that is under way."""
+
+    def test_a_marked_session_is_not_offered_again(self):
+        self.ended_transcript()
+        self.assertEqual(len(relay_detect.pending_sessions(self.cwd)), 1)
+        relay_common.mark_running(self.cwd, SID, pid=1234)
+        self.assertIn(SID, relay_common.running_sids(self.cwd))
+
+    def test_clearing_the_marker_puts_it_back_on_offer(self):
+        relay_common.mark_running(self.cwd, SID, pid=1234)
+        relay_common.clear_running(self.cwd, SID)
+        self.assertEqual(relay_common.running_sids(self.cwd), set())
+
+    def test_a_stale_marker_is_ignored_but_not_deleted(self):
+        """A recorder that died must not hold the session hostage.
+
+        Ignoring rather than deleting: removing the marker is the recorder's
+        own job, and a reader that tidies up after one it cannot see would
+        race with a recorder that is merely slow.
+        """
+        p = relay_common.mark_running(self.cwd, SID, pid=1234)
+        old = time.time() - relay_common.RECORDER_STALE_SECS - 60
+        os.utime(p, (old, old))
+        self.assertEqual(relay_common.running_sids(self.cwd), set())
+        self.assertTrue(p.exists())
+
+    def test_the_lock_is_not_counted_as_a_running_session(self):
+        relay_common.acquire_lock(self.cwd)
+        self.assertEqual(relay_common.running_sids(self.cwd), set())
+
+
+class TestRecorderLock(ApplyCase):
+    """One recorder per project, or current.md is decided by whoever ends last."""
+
+    def test_a_second_recorder_cannot_take_a_held_lock(self):
+        self.assertTrue(relay_common.acquire_lock(self.cwd))
+        self.assertFalse(relay_common.acquire_lock(self.cwd, wait=0))
+
+    def test_releasing_hands_it_to_the_next(self):
+        relay_common.acquire_lock(self.cwd)
+        relay_common.release_lock(self.cwd)
+        self.assertTrue(relay_common.acquire_lock(self.cwd, wait=0))
+
+    def test_a_lock_left_by_a_dead_recorder_is_taken(self):
+        """Judged by age, never by whether the pid is alive.
+
+        Pids get reused; a reused one reads as "still running" forever, and
+        the project would never record again.
+        """
+        relay_common.acquire_lock(self.cwd)
+        lock = relay_common.running_dir(self.cwd) / ".lock"
+        old = time.time() - relay_common.RECORDER_STALE_SECS - 60
+        os.utime(lock, (old, old))
+        self.assertTrue(relay_common.acquire_lock(self.cwd, wait=0))
+
+    def test_waiting_gives_up_at_the_limit(self):
+        """Waiting costs a live process, so it cannot be unbounded."""
+        relay_common.acquire_lock(self.cwd)
+        with mock.patch.object(relay_common.time, "sleep") as slept:
+            started = time.time()
+            ok = relay_common.acquire_lock(self.cwd, wait=30, now=started - 31)
+        self.assertFalse(ok)
+        self.assertFalse(slept.called)  # already past the limit on entry
+
+    def test_the_owner_is_named_in_the_file(self):
+        relay_common.acquire_lock(self.cwd)
+        body = relay_common.read_text(
+            relay_common.running_dir(self.cwd) / ".lock")
+        self.assertIn(f"pid={os.getpid()}", body)
+
+
+class TestTheCliDecidesWhenNotWhether(ApplyCase):
+    def test_a_missing_cli_is_reported_as_none(self):
+        with mock.patch.object(relay_common.shutil, "which", return_value=None):
+            self.assertIsNone(relay_common.claude_cli())
+
+    def test_a_present_cli_is_returned_verbatim(self):
+        with mock.patch.object(relay_common.shutil, "which",
+                               return_value=r"C:\bin\claude.exe"):
+            self.assertEqual(relay_common.claude_cli(), r"C:\bin\claude.exe")
+
+
 if __name__ == "__main__":
     unittest.main()

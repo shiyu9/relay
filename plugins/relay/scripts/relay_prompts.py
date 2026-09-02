@@ -292,9 +292,9 @@ auto mode の分類器に `Blocked by classifier` で拒否される（実測）
 # they hand the model the same jobs and the same apply command.
 
 TODO = """
-# relay: 未記録のセッションが {n} 件ある
+# relay: 記録するセッションが {n} 件ある
 
-**ユーザーへの最初の応答より前に**、次の手順で記録を済ませること。手順の外のことはしない。
+次の手順で記録する。手順の外のことはしない。
 """ + _PROCEDURE
 
 MANUAL = """
@@ -302,3 +302,53 @@ MANUAL = """
 
 次の手順で記録する。手順の外のことはしない。
 """ + _PROCEDURE
+
+# --- what SessionStart prints when a backlog is waiting -------------------
+#
+# Two steps, and the first one is speaking. Recording takes minutes, and a
+# session that goes silent for that long — before it has said anything at
+# all — looks like it hung. The user asked to be told what is happening
+# rather than be left waiting, so the notice is built to make that the
+# first thing that happens, not an afterthought once the work is done.
+#
+# The second step hands off to the same script the skill uses. Startup used
+# to print the procedure itself; routing both through one script is what
+# keeps the two entry points from drifting apart.
+
+STARTUP_NOTICE = """
+# relay: 未記録のセッションが {n} 件ある
+
+`knowledge/current.md` にはその分がまだ入っていない。**ユーザーへの最初の応答より前に**、\
+次の2つをこの順で行うこと。
+
+1. ユーザーに**1行だけ**伝える。何をしているかが見えないまま数分待たせないため:
+
+   `relay: 未記録のセッションが {n} 件あります。記録してから始めます。`
+
+2. 次の1行をそのまま実行し、**印字された手順にそのまま従う**:
+
+   `{cmd}`
+
+   `cd` を前に付けない・`&&` や `;` で他のコマンドとつながない（つないだ形は auto mode の\
+分類器に拒否される。実測）。
+
+手順の外のことはしない。終わったら「relay: 記録しました」と1行添えて、本来の作業に移ること。
+"""
+
+# --- what SessionStart prints while a recorder is still at work -----------
+#
+# The honest version of "current.md is one session old". The user does not
+# accept being handed a stale page silently, and this is the window where
+# staleness is unavoidable — the recorder started seconds ago and needs
+# minutes. Saying so is what makes it acceptable; the UserPromptSubmit hook
+# then says when the wait is over.
+
+RECORDING_NOW = """
+# relay: 前のセッション（{sids}）を記録中
+
+上の `knowledge/current.md` には**そのセッション分がまだ入っていない。**記録は数分かかる。
+
+- そのセッションに関わる判断は、**未確認として扱うこと**
+- 記録が終わったら、その旨が1行で伝えられる。そこで `knowledge/current.md` を読み直す
+- **同じセッションを重ねて記録しないこと。**記録係が別プロセスで動いている
+"""

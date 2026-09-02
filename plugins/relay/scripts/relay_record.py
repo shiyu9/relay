@@ -64,7 +64,10 @@ def main():
         print(note + "relay: 記録するセッションはありません。")
         return
 
-    print(note + write_jobs(cwd, pending, template=relay_prompts.MANUAL))
+    # Naming itself is what the skill adds; without a token this is the
+    # startup path, and the heading should not claim otherwise.
+    template = relay_prompts.MANUAL if me else relay_prompts.TODO
+    print(note + write_jobs(cwd, pending, template=template))
     log("record", f"{len(pending)} session(s) for {cwd} "
                   + (f"(self={me[:8]})" if me else "(self not identified)"))
 

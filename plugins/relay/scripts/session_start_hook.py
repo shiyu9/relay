@@ -1,15 +1,18 @@
 """relay SessionStart hook.
 
-Two jobs, both done through stdout (a SessionStart hook's stdout becomes
-context):
+Everything here goes through stdout, which a SessionStart hook turns into
+context. Three things get said, and two of them are usually nothing:
 
-1. Inject the project's knowledge and the most recent diary entries.
-2. When transcripts are still unrecorded, print the procedure that records
-   them. Recording runs as subagents of this session rather than a detached
-   headless `claude`, so it works in environments where the CLI is not
-   available at all. The long job bodies live in files; what is printed is
-   the short prompt that points a subagent at one (built by relay_jobs),
-   keeping the main session's context clear of the bodies themselves.
+1. The project's knowledge, recent diary, open tasks and current page.
+2. That a recorder is still at work — which means the page just injected is
+   knowingly incomplete. Saying so is the whole point: handing over a stale
+   current.md without a word is what the design refuses to do.
+3. That transcripts are waiting, plus the two steps that record them.
+
+On a machine with the CLI, recording happens at SessionEnd and this hook
+normally adds nothing. Without one — or when SessionEnd never fired at all —
+this is where the backlog is caught. The work itself is run by relay_record
+either way, so the two entry points cannot drift apart.
 
 Runs only on startup/clear; silent when there is nothing to say.
 """
@@ -27,19 +30,22 @@ from relay_common import (
     is_disabled,
     knowledge_path,
     log,
+    notified_dir,
     read_hook_input,
     read_text,
     recent_entries,
+    running_sids,
     tasks_outline,
 )
 from relay_detect import pending_sessions
-from relay_jobs import write_jobs
 
 KNOWLEDGE_TITLES = (
     ("pitfalls.md", "knowledge/pitfalls.md（技術的ハマりと回避策）"),
     ("workflow.md", "knowledge/workflow.md（このプロジェクトでの進め方の学び）"),
     ("decided.md", "knowledge/decided.md（見送った案と再開条件）"),
 )
+
+SCRIPTS = pathlib.Path(__file__).resolve().parent
 
 HANDOFF_RE = re.compile(r"(?ms)^### handoff\b.*?(?=^### |\Z)")
 
@@ -104,17 +110,38 @@ def main():
 
     # Detection must never break startup or swallow the injection above.
     try:
-        pending = pending_sessions(cwd)
+        running = running_sids(cwd)
+        pending = [p for p in pending_sessions(cwd) if p.sid not in running]
     except Exception as e:
         log("start", f"detect error: {e!r}")
         return
+
+    if running:
+        # Two things at once: tell the reader the page they were just handed
+        # is incomplete, and leave the note that lets UserPromptSubmit say
+        # when it stops being incomplete.
+        print(relay_prompts.RECORDING_NOW.format(
+            sids=" ".join(s[:8] for s in sorted(running))))
+        sid = data.get("session_id")
+        if sid:
+            try:
+                d = notified_dir(cwd)
+                d.mkdir(parents=True, exist_ok=True)
+                (d / f"{sid}.watch").write_text("\n".join(sorted(running)),
+                                                encoding="utf-8")
+            except OSError as e:
+                log("start", f"could not leave a watch for {sid[:8]}: {e!r}")
+        log("start", f"{len(running)} recorder(s) still at work in {cwd}")
+
     if not pending:
         return
-    try:
-        print(write_jobs(cwd, pending))
-        log("start", f"{len(pending)} session(s) to record for {cwd}")
-    except Exception as e:
-        log("start", f"job error: {e!r}")
+    # The procedure itself comes from relay_record, the same script the skill
+    # runs. What is injected here is the two steps that get there: say what
+    # is about to happen, then run it.
+    cmd = 'python "{}" --cwd "{}"'.format(
+        (SCRIPTS / "relay_record.py").as_posix(), pathlib.Path(cwd).as_posix())
+    print(relay_prompts.STARTUP_NOTICE.format(n=len(pending), cmd=cmd))
+    log("start", f"{len(pending)} session(s) to record for {cwd}")
 
 
 if __name__ == "__main__":

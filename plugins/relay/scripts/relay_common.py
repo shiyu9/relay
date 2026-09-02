@@ -11,6 +11,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import sys
 import time
 
@@ -39,6 +40,16 @@ RESUME_CUTOFF_DAYS = 15
 # time; candidates shrink monotonically, so nothing is stranded.
 MAX_JOBS = 3
 DEFAULT_MIN_USER_MSGS = 3
+# A recorder marker older than this belongs to a recorder that died. Measured
+# runs take 2-4 minutes, so this is generous by design: treating a slow
+# recorder as dead means recording the same session twice.
+RECORDER_STALE_SECS = 30 * 60
+# How long a recorder waits for the project lock before giving up. Waiting
+# costs a live process, so a project whose sessions close back to back must
+# not stack them up; the one that gives up leaves its marker and the next
+# startup picks the session up instead.
+LOCK_WAIT_SECS = 10 * 60
+LOCK_POLL_SECS = 5
 # How recently a transcript must have been written to be a candidate for
 # "the session running this". The manual entry point names itself with a
 # token, and a tool call reaches the transcript before it runs, so the file
@@ -317,6 +328,127 @@ def tasks_path(cwd):
     """The project's own task list. relay reads it and strikes items off;
     everything that gets added to it is written by the session itself."""
     return pathlib.Path(cwd) / "tasks.md"
+
+
+def running_dir(cwd):
+    """Markers for recorders currently at work in this project."""
+    return relay_home() / "running" / sanitize_cwd(cwd)
+
+
+def notified_dir(cwd):
+    """Sessions already told that a recording they were waiting on finished."""
+    return relay_home() / "notified" / sanitize_cwd(cwd)
+
+
+def claude_cli():
+    """The headless CLI, or None when it is not installed.
+
+    This is what decides which half of the design a machine gets: with a CLI
+    the recorder runs at SessionEnd and the next startup finds current.md
+    already up to date; without one, SessionEnd leaves a marker and the next
+    session records it. Both paths exist anyway — the startup path is also
+    what catches sessions whose SessionEnd never fired — so the branch costs
+    a condition, not a second mechanism.
+    """
+    return shutil.which("claude")
+
+
+def mark_running(cwd, sid, pid=None, note=""):
+    """Record that a recorder is working on `sid`.
+
+    Detection reads the diary, and the diary stays unchanged until the
+    recorder finishes — for the two to four minutes in between, the session
+    looks exactly like one nobody has touched. Without this marker the next
+    startup would record it a second time.
+    """
+    d = running_dir(cwd)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / sid
+    body = f"{local_now().isoformat(timespec='seconds')} pid={pid} {note}\n"
+    try:
+        p.write_text(body, encoding="utf-8")
+    except OSError as e:
+        log("run", f"could not mark {sid[:8]} as running: {e!r}")
+    return p
+
+
+def clear_running(cwd, sid):
+    try:
+        (running_dir(cwd) / sid).unlink(missing_ok=True)
+    except OSError as e:
+        log("run", f"could not clear the marker for {sid[:8]}: {e!r}")
+
+
+def running_sids(cwd, now=None):
+    """Sessions with a recorder that still looks alive.
+
+    Stale markers are ignored rather than deleted. Removing one is the
+    recorder's own job, and a hook that tidies up after a recorder it cannot
+    see risks clearing the marker of one that is merely slow.
+    """
+    now = time.time() if now is None else now
+    out = set()
+    try:
+        for p in running_dir(cwd).iterdir():
+            if p.name.startswith("."):
+                continue  # the lock lives here too
+            try:
+                if now - p.stat().st_mtime < RECORDER_STALE_SECS:
+                    out.add(p.name)
+            except OSError:
+                pass
+    except OSError:
+        pass  # no directory yet -> nothing is running
+    return out
+
+
+def acquire_lock(cwd, wait=LOCK_WAIT_SECS, now=None):
+    """Serialise recorders within one project. True if we hold the lock.
+
+    Two recorders that overwrite current.md in parallel produce whichever
+    answer finished last, which is the failure the .status sidecar was built
+    for in 2026-08-01. Ordering them fixes it at the source: the second
+    recorder reads a diary that already holds the first one's entry.
+
+    A lock older than RECORDER_STALE_SECS is taken, because its owner is
+    gone. The owner's pid and time are written inside for the log to name,
+    but the decision rests on the file's age alone — pids get reused, and a
+    reused pid reads as "still alive" forever.
+    """
+    d = running_dir(cwd)
+    d.mkdir(parents=True, exist_ok=True)
+    lock = d / ".lock"
+    started = time.time() if now is None else now
+    while True:
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, f"{local_now().isoformat(timespec='seconds')} "
+                         f"pid={os.getpid()}\n".encode("utf-8"))
+            os.close(fd)
+            return True
+        except FileExistsError:
+            pass
+        except OSError as e:
+            log("run", f"lock unavailable in {cwd}: {e!r}")
+            return False
+        try:
+            if time.time() - lock.stat().st_mtime > RECORDER_STALE_SECS:
+                log("run", f"taking a lock abandoned by {read_text(lock).strip()}")
+                lock.unlink(missing_ok=True)
+                continue
+        except OSError:
+            continue  # it vanished between the two calls; try to take it
+        if time.time() - started >= wait:
+            log("run", f"gave up waiting for the lock in {cwd}")
+            return False
+        time.sleep(LOCK_POLL_SECS)
+
+
+def release_lock(cwd):
+    try:
+        (running_dir(cwd) / ".lock").unlink(missing_ok=True)
+    except OSError as e:
+        log("run", f"could not release the lock in {cwd}: {e!r}")
 
 
 def write_atomic(path, text):

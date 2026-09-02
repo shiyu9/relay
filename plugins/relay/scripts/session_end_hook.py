@@ -1,22 +1,43 @@
-"""relay SessionEnd hook — drops one marker and does nothing else.
+"""relay SessionEnd hook — start the recorder and get out of the way.
 
-Earlier versions started the recorder here. In terminal setups where the
-window closes together with claude the hook can be killed mid-flight at any
-moment (observed: sometimes before it can log a single line), so recording
-moved to SessionStart entirely. What remains is the one fact SessionStart
-cannot learn on its own: that this session is over rather than merely quiet.
+**This hook has 1.5 seconds and cannot ask for more.** Measured on 2026-09-02:
+a timeout declared in a plugin's hooks.json is ignored (5 and 30 behave
+exactly like no declaration), while the same declaration in settings.json
+works. When a hook exceeds its timeout, its whole process tree is killed —
+so a recorder started here dies with it. Inside the timeout nothing is
+killed at all.
 
-Without the marker, detection has to wait out the idle threshold, and a
-session closed and reopened a minute later would hand nothing to its
-successor. Creating an empty file is the cheapest thing this hook could
-possibly do, and if even that is cut short the idle rule still catches up —
-so the marker is an optimisation, never a dependency.
+That gives this file its shape. It drops a marker, starts one process, and
+writes one line: about 50ms, with the ceiling two orders of magnitude away.
+Anything that could block belongs in the recorder, which has all the time it
+needs once it is running.
+
+The recorder is started with its parent re-pointed outside this hook's tree
+(relay_spawn), so that even an over-run — an antivirus scanning python.exe
+on launch is the realistic cause — cannot take it down.
+
+Without the CLI there is nobody to record with, so the hook leaves only the
+end marker and the next session picks the transcript up. That is the same
+path a session whose SessionEnd never fired takes, so it is not a second
+mechanism, just a second way into the one that already exists.
 """
 import os
+import pathlib
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from relay_common import ended_dir, in_scope, is_disabled, read_hook_input
+import relay_spawn
+from relay_common import (
+    claude_cli,
+    ended_dir,
+    in_scope,
+    is_disabled,
+    log,
+    mark_running,
+    read_hook_input,
+)
+
+SCRIPTS = pathlib.Path(__file__).resolve().parent
 
 
 def main():
@@ -24,17 +45,40 @@ def main():
         return
     data = read_hook_input()
     cwd = data.get("cwd") or os.getcwd()
-    session_id = data.get("session_id")
-    if not session_id or not in_scope(cwd):
+    sid = data.get("session_id")
+    if not sid or not in_scope(cwd):
         return
+
+    # Always, whether or not a recorder follows: this is the fact that lets
+    # the next session tell "over" from "merely quiet" without waiting out
+    # the idle rule.
     d = ended_dir(cwd)
     d.mkdir(parents=True, exist_ok=True)
-    open(d / str(session_id), "w").close()
+    open(d / str(sid), "w").close()
+
+    cli = claude_cli()
+    if not cli:
+        log("end", f"no claude CLI; {sid[:8]} is left for the next startup")
+        return
+
+    pid, how = relay_spawn.start(
+        [sys.executable, str(SCRIPTS / "relay_record_headless.py"),
+         "--cwd", str(cwd), "--sid", str(sid)])
+    if pid:
+        # Written here rather than in the recorder: the marker has to exist
+        # before the next session can possibly start, and the recorder may
+        # still be getting off the ground.
+        mark_running(cwd, sid, pid=pid, note=how)
+        log("end", f"recorder pid={pid} for {sid[:8]} ({how})")
+    else:
+        log("end", f"no recorder for {sid[:8]}: {how}")
 
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception:  # never break session shutdown, and never spend time
-        pass           # explaining why: the idle fallback covers this
+    except Exception as e:
+        # Never break session shutdown. The idle rule and the next startup
+        # both still work when this hook does nothing at all.
+        log("end", f"error: {e!r}")
     sys.exit(0)
