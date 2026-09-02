@@ -698,7 +698,7 @@ class TestKnowledgeDatesComeFromPython(PipelineCase):
     def test_the_job_body_needs_only_what_the_hook_hands_it(self):
         """`{date}` を書き戻すと hook の format が KeyError で黙って落ちる。"""
         body = relay_prompts.RECORD.format(out="o", transcript="t",
-                                          condensed="c",
+                                           reading="r",
                                            pitfalls="p", workflow="w")
         self.assertIn("===DIARY===", body)
 
@@ -903,6 +903,16 @@ class TestTheStrikeOffJobHasWhatItNeeds(PipelineCase):
         body = self.job_body_for_record()
         self.assertIn("condensed", body)
         self.assertIn("最初から最後まで全部読むこと", body)
+
+    def test_the_job_names_the_reading_by_path(self):
+        parts = relay_common.condensed_parts(self.cwd, SID)
+        self.assertTrue(parts)
+        body = self.job_body_for_record()
+        for p in parts:
+            self.assertIn(p.as_posix(), body)
+
+    def test_the_job_asks_for_the_count_it_will_be_checked_against(self):
+        self.assertIn("===READ===", self.job_body_for_record())
 
     def test_the_job_still_carries_the_original(self):
         """Clipping is only safe while the full text is reachable."""
@@ -1223,6 +1233,133 @@ class TestTheEndOfTheWaitIsAnnounced(PipelineCase):
             user_prompt_hook.main()
         self.assertEqual(out.getvalue(), "")
 
+
+
+class TestTheReadingIsHandedOverInParts(PipelineCase):
+    """Feature: 読み物は Read が断れない大きさで、パートごとに名指しで渡す
+
+    実測（2026-09-03）: 2.97MB のセッションの縮約版 282KB を「全部読め」と
+    渡したところ、Read は 256KB / 25,000 トークンで拒否し、録音係は
+    head / tail / grep に逃げて 3971 行のうち 100〜3800 行を読まずに書いた。
+    """
+
+    def big_transcript(self, turns=250):
+        """A session long enough that its reading has to be split."""
+        tdir = relay_common.transcripts_dir(self.cwd)
+        tdir.mkdir(parents=True, exist_ok=True)
+        rows = []
+        for i in range(turns):
+            rows.append({"type": "user", "sessionId": SID,
+                         "timestamp": utc_text(dt(2026, 8, 27, 19, 11)),
+                         "message": {"content": [
+                             {"type": "text", "text": f"発言 {i}"}]}})
+            rows.append({"type": "assistant", "sessionId": SID,
+                         "message": {"content": [
+                             {"type": "text", "text": f"応答 {i}"},
+                             {"type": "tool_use", "name": "Bash",
+                              "input": {"command": "x" * 2000}}]}})
+        p = tdir / f"{SID}.jsonl"
+        p.write_text("\n".join(json.dumps(r, ensure_ascii=False)
+                                for r in rows) + "\n", encoding="utf-8")
+        os.utime(p, (time.time() - 7200, time.time() - 7200))
+        return p
+
+    def job_for(self, sid=SID):
+        return relay_common.read_text(
+            relay_common.jobs_dir(self.cwd) / f"{sid}.md")
+
+    def test_a_long_session_is_listed_part_by_part(self):
+        self.big_transcript()
+        self.run_record()
+        parts = relay_common.condensed_parts(self.cwd, SID)
+        self.assertGreater(len(parts), 1)
+        body = self.job_for()
+        for i, p in enumerate(parts, 1):
+            self.assertIn(f"  {i}. {p.as_posix()}", body)
+
+    def test_it_is_told_not_to_fall_back_to_head_and_grep(self):
+        """That fallback is exactly what produced the entry we lost."""
+        self.big_transcript()
+        self.run_record()
+        body = self.job_for()
+        self.assertIn("`offset` も `limit` も付けず", body)
+        self.assertIn("代用してはいけません", body)
+
+    def test_a_short_session_is_still_handed_one_file(self):
+        self.make_transcript(SID, dt(2026, 8, 27, 19, 11),
+                             dt(2026, 8, 27, 22, 30), mtime=time.time() - 7200)
+        self.run_record()
+        self.assertEqual(
+            [p.name for p in relay_common.condensed_parts(self.cwd, SID)],
+            [f"{SID}.md"])
+
+
+class TestTheReadingIsCheckedAgainstWhatWasOpened(PipelineCase):
+    """Feature: 読んだパート数を relay_apply が実物と突き合わせる"""
+
+    def setUp(self):
+        super().setUp()
+        self.make_transcript(SID, dt(2026, 8, 27, 19, 11),
+                             dt(2026, 8, 27, 22, 30), mtime=time.time() - 7200)
+        self.parts = []
+        d = relay_common.condensed_dir(self.cwd)
+        d.mkdir(parents=True, exist_ok=True)
+
+    def split_into(self, n):
+        d = relay_common.condensed_dir(self.cwd)
+        (d / f"{SID}.md").unlink(missing_ok=True)
+        for i in range(1, n + 1):
+            (d / f"{SID}.part{i:02d}.md").write_text("x", encoding="utf-8")
+
+    def record(self, read_section):
+        self.put_inbox(SID, f"===READ===\n{read_section}\n===DIARY===\n"
+                            f"### done\n- 何かした\n===PITFALLS===\n"
+                            f"===WORKFLOW===\n===END===\n")
+        return self.summary()
+
+    def entry(self):
+        return relay_common.read_text(
+            relay_common.diary_dir(self.cwd) / "2026-08-27.md")
+
+    def test_reading_all_of_it_passes_without_a_mark(self):
+        self.split_into(8)
+        self.assertEqual(self.record("8")["short"], "0")
+        self.assertNotIn("relay 注意", self.entry())
+
+    def test_stopping_early_is_written_into_the_entry(self):
+        self.split_into(8)
+        self.assertEqual(self.record("3")["short"], "1")
+        entry = self.entry()
+        self.assertIn("relay 注意", entry)
+        self.assertIn("8 パート", entry)
+        self.assertIn("3 パート", entry)
+
+    def test_the_entry_is_kept_even_when_it_is_short(self):
+        """Refusing it would offer the same transcript again forever."""
+        self.split_into(8)
+        self.record("1")
+        self.assertIn("### done", self.entry())
+        self.assertIn("何かした", self.entry())
+
+    def test_saying_nothing_at_all_counts_as_stopping_early(self):
+        self.split_into(8)
+        self.put_inbox(SID, "===DIARY===\n### done\n- 何かした\n"
+                            "===PITFALLS===\n===WORKFLOW===\n===END===\n")
+        self.assertEqual(self.summary()["short"], "1")
+        self.assertIn("申告なし", self.entry())
+
+    def test_a_one_file_reading_is_not_checked(self):
+        """It was never refused, and older jobs have no count to give."""
+        (relay_common.condensed_dir(self.cwd)
+         / f"{SID}.md").write_text("x", encoding="utf-8")
+        self.put_inbox(SID, "===DIARY===\n### done\n- 何かした\n"
+                            "===PITFALLS===\n===WORKFLOW===\n===END===\n")
+        self.assertEqual(self.summary()["short"], "0")
+        self.assertNotIn("relay 注意", self.entry())
+
+    def test_reading_more_than_there_is_is_not_an_error(self):
+        self.split_into(3)
+        self.assertEqual(self.record("4")["short"], "0")
 
 if __name__ == "__main__":
     unittest.main()

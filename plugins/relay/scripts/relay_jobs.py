@@ -12,12 +12,15 @@ import pathlib
 
 import relay_prompts
 from relay_common import (
+    CONTEXT_BUDGET_TOKENS,
     condense_transcript,
     condensed_dir,
     inbox_dir,
     jobs_dir,
     knowledge_path,
+    log,
     read_text,
+    reading_tokens,
     recent_entries,
     tasks_outline,
     write_prune_job,
@@ -25,6 +28,35 @@ from relay_common import (
 
 DEFAULT_MODEL = "claude-haiku-4-5"
 SCRIPTS = pathlib.Path(__file__).resolve().parent
+
+
+def reading_block(cwd, sid, parts):
+    """The `読むもの` section of a recording job.
+
+    Naming every part is the whole point. Told the size and left to work out
+    its own offsets, the recorder hit the ceiling, fell back to `head` and
+    `tail`, and wrote an entry that covered the last hour of a sixteen-hour
+    session; asked to open eight files it can open, it has nothing to work
+    out. The count is also what `relay_apply` checks the answer against, so
+    the list and the check read the same directory.
+    """
+    if len(parts) <= 1:
+        block = relay_prompts.READING_ONE.format(
+            path=parts[0].as_posix() if parts else "(なし)")
+    else:
+        listing = "\n".join(
+            f"  {i}. {p.as_posix()}" for i, p in enumerate(parts, 1))
+        block = relay_prompts.READING_PARTS.format(n=len(parts), list=listing)
+
+    # No session has crossed this yet, so the honest thing is to notice it
+    # rather than to build a second mechanism for a size nobody has measured.
+    tokens = reading_tokens(parts)
+    if tokens > CONTEXT_BUDGET_TOKENS:
+        log("jobs", f"{sid[:8]}: reading is ~{tokens} tokens, over the "
+                    f"{CONTEXT_BUDGET_TOKENS} budget; the recorder is told "
+                    "it may not get through it")
+        block += relay_prompts.READING_OVERSIZE.format(k=round(tokens / 10000))
+    return block
 
 
 def write_jobs(cwd, pending, here=SCRIPTS, template=None):
@@ -52,11 +84,11 @@ def write_jobs(cwd, pending, here=SCRIPTS, template=None):
         # Built here, once per job: the recorder is asked to read all of it,
         # and that is only a reasonable request against the condensed form.
         # The original path goes along too, for the clipped tool results.
-        condensed = condense_transcript(
+        parts = condense_transcript(
             p.path, condensed_dir(cwd) / f"{p.sid}.md")
         job.write_text(relay_prompts.RECORD.format(
             out=out.as_posix(), transcript=p.path.as_posix(),
-            condensed=condensed.as_posix(),
+            reading=reading_block(cwd, p.sid, parts),
             pitfalls=pitfalls, workflow=workflow), encoding="utf-8")
         lines.append(relay_prompts.CALL_BLOCK.format(
             title=f"ジョブ {i}/{len(pending)}: {p.date} のセッション {p.sid8}",

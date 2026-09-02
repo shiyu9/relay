@@ -50,6 +50,18 @@ class ApplyCase(RelayCase):
 
 # --- 1 boundaries ---------------------------------------------------------
 
+def midday_before(now):
+    """The most recent 12:00 that is at least two hours in the past.
+
+    Fixtures built from it can never straddle midnight, so a heading written
+    from `end - 1h` to `end` reads the same way in every hour of the day.
+    """
+    noon = now.replace(hour=12, minute=0, second=0, microsecond=0)
+    while noon > now - datetime.timedelta(hours=2):
+        noon -= datetime.timedelta(days=1)
+    return noon
+
+
 class TestBoundaries(ApplyCase):
     def test_no_transcripts_at_all(self):
         self.assertEqual(relay_detect.pending_sessions(self.cwd), [])
@@ -78,8 +90,12 @@ class TestBoundaries(ApplyCase):
         for gap, expected in ((datetime.timedelta(days=14, hours=23), "replace"),
                               (datetime.timedelta(days=15), "resume")):
             with self.subTest(gap=gap):
-                end = relay_common.local_now().replace(
-                    second=0, microsecond=0) - datetime.timedelta(hours=2)
+                # Anchored to midday, not to "two hours ago". Run between
+                # 02:00 and 02:59 the old fixture wrote a heading like
+                # "23:56-00:56", which parses back a day later (`end < start`
+                # means the session ran past midnight), and the 15-day case
+                # came out as 14 — red for an hour a day, green the rest.
+                end = midday_before(relay_common.local_now())
                 prev_end = end - gap
                 day = prev_end.date().isoformat()
                 self.write_diary(day, "## S1 {:%H:%M}-{:%H:%M} ({})\n- x\n".format(
@@ -747,53 +763,164 @@ class TestCondensing(ApplyCase):
         dst = relay_common.condensed_dir(self.cwd) / f"{SID}.md"
         return src, relay_common.condense_transcript(src, dst)
 
+    def reading(self, parts):
+        """Every part joined back up, headers stripped: what was condensed."""
+        out = []
+        for p in parts:
+            text = relay_common.read_text(p)
+            if text.startswith("<!--"):
+                text = text.partition("\n\n")[2]
+            out.append(text.rstrip("\n"))
+        return "\n\n".join(out)
+
     def test_every_spoken_line_survives(self):
         """The whole point: nothing a person said may be dropped."""
-        src, dst = self.build(turns=5)
-        text = relay_common.read_text(dst)
+        src, parts = self.build(turns=5)
+        text = self.reading(parts)
         for i in range(5):
             self.assertIn(f"ユーザーの発言 {i}", text)
             self.assertIn(f"応答 {i}", text)
 
     def test_thinking_survives_because_decisions_are_built_from_it(self):
-        src, dst = self.build()
-        self.assertIn("考えたこと 0", relay_common.read_text(dst))
+        src, parts = self.build()
+        self.assertIn("考えたこと 0", self.reading(parts))
 
     def test_tool_results_are_clipped_not_dropped(self):
-        src, dst = self.build(result_len=4000)
-        text = relay_common.read_text(dst)
+        src, parts = self.build(result_len=4000)
+        text = self.reading(parts)
         self.assertIn("[result] RRR", text)
         self.assertIn("文字省略", text)
         self.assertNotIn("R" * 1000, text)
 
     def test_the_metadata_nobody_reads_is_gone(self):
-        src, dst = self.build()
-        text = relay_common.read_text(dst)
+        src, parts = self.build()
+        text = self.reading(parts)
         self.assertNotIn("parentUuid", text)
         self.assertNotIn("uuid", text)
         self.assertNotIn("2026-08-27T19:11", text)
 
     def test_it_shrinks_by_an_order_of_magnitude(self):
         """Measured on a real 5321 KB transcript: 737 KB, 14%."""
-        src, dst = self.build(turns=40, result_len=8000)
-        ratio = dst.stat().st_size / src.stat().st_size
+        src, parts = self.build(turns=40, result_len=8000)
+        ratio = sum(p.stat().st_size for p in parts) / src.stat().st_size
         self.assertLess(ratio, 0.30, f"縮約が効いていない（{ratio:.0%}）")
 
     def test_a_half_written_line_is_stepped_over(self):
-        src, dst = self.build()
+        src, parts = self.build()
         src.write_text("{not json\n" + relay_common.read_text(src),
                        encoding="utf-8")
         again = relay_common.condense_transcript(
             src, relay_common.condensed_dir(self.cwd) / f"{SID}.md")
-        self.assertIn("ユーザーの発言 0", relay_common.read_text(again))
+        self.assertIn("ユーザーの発言 0", self.reading(again))
 
     def test_the_speakers_are_marked_in_order(self):
-        src, dst = self.build(turns=2)
-        heads = [l for l in relay_common.read_text(dst).splitlines()
+        src, parts = self.build(turns=2)
+        heads = [l for l in self.reading(parts).splitlines()
                  if l.startswith("### ")]
         self.assertEqual(heads[:4], ["### user", "### assistant", "### user",
                                      "### user"])
 
+
+
+class TestReadingParts(ApplyCase):
+    """Feature: 読み物は Read が断れない大きさに割って渡す"""
+
+    def build(self, turns):
+        return TestCondensing.build(self, turns=turns, result_len=8000)
+
+    def test_a_small_reading_stays_one_file_with_the_name_it_had(self):
+        src, parts = self.build(turns=2)
+        self.assertEqual([p.name for p in parts], [f"{SID}.md"])
+
+    def test_a_large_reading_is_split_and_numbered_in_order(self):
+        src, parts = self.build(turns=250)
+        self.assertGreater(len(parts), 1)
+        self.assertEqual([p.name for p in parts],
+                         [f"{SID}.part{i:02d}.md"
+                          for i in range(1, len(parts) + 1)])
+        self.assertFalse((relay_common.condensed_dir(self.cwd)
+                          / f"{SID}.md").exists(),
+                         "割ったのに丸ごとの版が残っている")
+
+    def test_no_part_can_be_refused_by_read(self):
+        """Each one stays under the ceiling that started all of this."""
+        src, parts = self.build(turns=250)
+        for p in parts:
+            self.assertLessEqual(p.stat().st_size,
+                                 relay_common.READ_PART_BYTES + 200, p.name)
+
+    def test_the_parts_hold_everything_the_one_file_held(self):
+        src, parts = self.build(turns=250)
+        text = TestCondensing.reading(self, parts)
+        for i in range(60):
+            self.assertIn(f"ユーザーの発言 {i}", text)
+            self.assertIn(f"応答 {i}", text)
+
+    def test_each_part_says_which_one_it_is(self):
+        src, parts = self.build(turns=250)
+        first = relay_common.read_text(parts[0]).splitlines()[0]
+        self.assertIn(f"1/{len(parts)}", first)
+
+    def test_one_oversized_turn_is_cut_rather_than_left_over_the_limit(self):
+        blocks = ["### user\n" + "あ" * relay_common.READ_PART_BYTES]
+        runs = relay_common._split_blocks(blocks)
+        self.assertGreater(len(runs), 1)
+        for run in runs:
+            self.assertLessEqual(
+                len("".join(run).encode("utf-8")),
+                relay_common.READ_PART_BYTES)
+
+    def test_shrinking_again_leaves_no_parts_from_the_larger_run(self):
+        src, parts = self.build(turns=250)
+        self.assertGreater(len(parts), 1)
+        src, again = self.build(turns=2)
+        self.assertEqual([p.name for p in again], [f"{SID}.md"])
+        self.assertEqual(
+            sorted(relay_common.condensed_dir(self.cwd).glob(f"{SID}.part*")),
+            [])
+
+    def test_the_parts_are_found_again_from_the_other_process(self):
+        src, parts = self.build(turns=250)
+        self.assertEqual(relay_common.condensed_parts(self.cwd, SID), parts)
+
+    def test_a_reading_nobody_condensed_has_no_parts(self):
+        self.assertEqual(relay_common.condensed_parts(self.cwd, "nope"), [])
+
+
+class TestRelayHome(ApplyCase):
+    """Feature: relay の置き場所は環境変数で差し替えられる
+
+    実測（2026-09-03）: 試験一式を1回流すごとに、開発者本人の
+    `~/.claude/relay/running/` に消えた一時パス名のディレクトリが1つ増えていた。
+    `Path.home` へのパッチは同一プロセスにしか効かず、終了フックが産む
+    切り離された録音係は別プロセスだったため。
+    """
+
+    def test_the_variable_wins_over_the_home_directory(self):
+        elsewhere = self.home / "somewhere-else"
+        with mock.patch.dict(os.environ, {"RELAY_HOME": str(elsewhere)}):
+            self.assertEqual(relay_common.relay_home(), elsewhere)
+
+    def test_without_it_the_home_directory_is_used(self):
+        env = {k: v for k, v in os.environ.items() if k != "RELAY_HOME"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(relay_common.relay_home(),
+                             self.home / ".claude" / "relay")
+
+    def test_the_suite_points_it_at_its_own_temporary_home(self):
+        """A child process started by a test must land here, not in ~."""
+        self.assertEqual(pathlib.Path(os.environ["RELAY_HOME"]),
+                         self.home / ".claude" / "relay")
+
+    def test_every_path_relay_writes_sits_under_it(self):
+        elsewhere = self.home / "somewhere-else"
+        with mock.patch.dict(os.environ, {"RELAY_HOME": str(elsewhere)}):
+            for p in (relay_common.epoch_path(self.cwd),
+                      relay_common.running_dir(self.cwd),
+                      relay_common.inbox_dir(self.cwd),
+                      relay_common.jobs_dir(self.cwd),
+                      relay_common.condensed_dir(self.cwd)):
+                self.assertTrue(str(p).startswith(str(elsewhere)), p)
 
 if __name__ == "__main__":
     unittest.main()

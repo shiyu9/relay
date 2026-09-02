@@ -57,6 +57,21 @@ LOCK_POLL_SECS = 5
 SELF_WINDOW_SECS = 5 * 60
 # knowledge/ files are meant to stay small; past this the pruning job runs.
 PRUNE_LINES = 80
+# Read refuses a file over 256 KB, and refuses any single call over 25,000
+# tokens. Measured on the condensed form of a 2.97 MB session: its first
+# 1000 lines were 60,095 bytes and 25,449 tokens — 2.36 bytes per token, so
+# the 25,000-token ceiling is about 59 KB of this text. Parts are cut at
+# 40 KB to keep half again as much headroom, because density is not even:
+# across that file's 100-line windows it ran from 3.8 KB to 11.0 KB, a
+# threefold spread that a fixed line count cannot ride out.
+READ_PART_BYTES = 40 * 1000
+BLOCK_SEP = "\n\n"
+BYTES_PER_TOKEN = 2.36
+# Past this the reading no longer fits in one context beside the job and the
+# answer, and the recorder runs out before the end. The largest reading seen
+# so far is 282 KB (about 120,000 tokens) and it fit, so this is a line for
+# noticing the first one that does not — not a design for handling it.
+CONTEXT_BUDGET_TOKENS = 150_000
 
 # "## S1 19:11-22:30 (124c52dd)" — the only headings relay owns. A session
 # that ran past midnight carries the day count too ("08:14-08:13+3d"): without
@@ -149,6 +164,20 @@ def force_utf8():
 
 
 def relay_home():
+    """Where relay keeps everything that is not in the project.
+
+    `RELAY_HOME` exists for the tests. They patch `Path.home` to a temporary
+    directory, which holds for anything running in-process — but the end
+    hook spawns a real detached recorder, and that child starts a fresh
+    interpreter where the patch never existed. It wrote into the developer's
+    own `~/.claude/relay/` instead: 13 stray epoch files and 25 stray
+    `running/` directories keyed by long-deleted temp paths, one more with
+    every full run of the suite. An environment variable is the only kind of
+    patch a child process inherits.
+    """
+    override = os.environ.get("RELAY_HOME")
+    if override:
+        return pathlib.Path(override)
     return pathlib.Path.home() / ".claude" / "relay"
 
 
@@ -371,6 +400,18 @@ def condense_transcript(src, dst):
 
     The clipping is why the job also carries the original path: what is cut
     here can still be fetched there, on the rare occasion it matters.
+
+    Small enough to summarise turned out not to be small enough to read.
+    Read refuses a file over 256 KB, and refuses any single call over 25,000
+    tokens, so on a 2.97 MB session the recorder met "read all of it" with a
+    file it could not open: it asked for the whole thing, then 1000 lines,
+    then settled for 100, and finished the job on `head`, `tail` and `grep`.
+    Lines 100 to 3800 were never read, and sixteen hours came out as the
+    last one. So the reading is handed over already cut into parts that Read
+    cannot refuse, and the job names them one by one — the recorder opens
+    files rather than doing arithmetic against a ceiling it keeps hitting.
+
+    Returns the parts in order. One part means one file, named as before.
     """
     lines = []
     for raw in read_text(src).splitlines():
@@ -401,8 +442,124 @@ def condense_transcript(src, dst):
         if body:
             lines.append(f"### {role}\n{body}")
     dst.parent.mkdir(parents=True, exist_ok=True)
-    write_atomic(dst, "\n\n".join(lines) + "\n")
-    return dst
+    return _write_reading(dst, lines)
+
+
+def _split_blocks(blocks, budget=READ_PART_BYTES):
+    """Group `blocks` into runs that each stay under `budget` bytes.
+
+    Cuts fall between turns, so no part opens midway through somebody's
+    sentence. A single turn bigger than the budget cannot be kept whole and
+    is cut on line boundaries instead — rare, but one pasted log makes one,
+    and a part that overshot the ceiling would be refused exactly like the
+    file this whole mechanism exists to stop producing.
+    """
+    out, run, size = [], [], 0
+    for b in blocks:
+        n = len(b.encode("utf-8")) + 2  # the blank line that follows it
+        if n > budget:
+            if run:
+                out.append(run)
+                run, size = [], 0
+            out.extend([piece] for piece in _split_one(b, budget))
+            continue
+        if run and size + n > budget:
+            out.append(run)
+            run, size = [], 0
+        run.append(b)
+        size += n
+    if run:
+        out.append(run)
+    return out
+
+
+def _split_one(block, budget):
+    """One oversized turn, cut on line boundaries — then, if it has to, inside
+    a line. A pasted log arrives as one line of half a megabyte, and a piece
+    that stayed over the ceiling would be refused like the file this exists
+    to stop producing. Cuts land between characters, never inside one."""
+    pieces, cur, size = [], [], 0
+    for line in block.splitlines(True):
+        for chunk in _cut_bytes(line, budget):
+            n = len(chunk.encode("utf-8"))
+            if cur and size + n > budget:
+                pieces.append("".join(cur))
+                cur, size = [], 0
+            cur.append(chunk)
+            size += n
+    if cur:
+        pieces.append("".join(cur))
+    return pieces
+
+
+def _cut_bytes(text, budget):
+    """`text` in runs of at most `budget` bytes, split between characters."""
+    if len(text.encode("utf-8")) <= budget:
+        return [text]
+    out, cur, size = [], [], 0
+    for ch in text:
+        n = len(ch.encode("utf-8"))
+        if cur and size + n > budget:
+            out.append("".join(cur))
+            cur, size = [], 0
+        cur.append(ch)
+        size += n
+    if cur:
+        out.append("".join(cur))
+    return out
+
+
+def _write_reading(dst, blocks):
+    """Write the reading as `dst`, or as numbered parts beside it.
+
+    Whatever the last run left is removed first. A session condensed again
+    after it grew would otherwise keep a stale whole file next to fresh
+    parts, and the count the job promises would not be the count on disk.
+    """
+    stem = dst.stem
+    for old in [dst, *sorted(dst.parent.glob(stem + ".part*" + dst.suffix))]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+    runs = _split_blocks(blocks)
+    if len(runs) <= 1:
+        write_atomic(dst, BLOCK_SEP.join(blocks) + "\n")
+        return [dst]
+
+    paths = []
+    for i, run in enumerate(runs, 1):
+        p = dst.parent / "{}.part{:02d}{}".format(stem, i, dst.suffix)
+        head = "<!-- {} パート {}/{} -->".format(stem, i, len(runs))
+        write_atomic(p, head + BLOCK_SEP + BLOCK_SEP.join(run) + "\n")
+        paths.append(p)
+    return paths
+
+
+def condensed_parts(cwd, sid):
+    """The reading the recorder was handed for `sid`, in order.
+
+    Read back off the disk rather than remembered: the check that uses it
+    runs in a different process from the one that wrote the job.
+    """
+    d = condensed_dir(cwd)
+    parts = sorted(d.glob(sid + ".part*.md"))
+    if parts:
+        return parts
+    whole = d / (sid + ".md")
+    return [whole] if whole.exists() else []
+
+
+def reading_tokens(paths):
+    """Roughly how many tokens the whole reading is, for the budget check."""
+    total = 0
+    for p in paths:
+        try:
+            total += p.stat().st_size
+        except OSError:
+            pass
+    return int(total / BYTES_PER_TOKEN)
 
 
 def running_dir(cwd):

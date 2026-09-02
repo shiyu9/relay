@@ -18,6 +18,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "plugins" / "relay" / "scripts"))
 
 import relay_common  # noqa: E402
+import relay_spawn  # noqa: E402
 
 
 def utc_text(local_dt):
@@ -43,9 +44,25 @@ class RelayCase(unittest.TestCase):
         # RELAY_SCOPE in particular would put the throwaway project out of
         # scope and turn every hook into a silent no-op.
         clean = {k: v for k, v in os.environ.items() if not k.startswith("RELAY_")}
+        # Patching `Path.home` covers everything running in this interpreter,
+        # and nothing at all in a child. The end hook spawns a real detached
+        # recorder, and that child wrote into the developer's own
+        # `~/.claude/relay/` — 13 stray epoch files and 25 stray `running/`
+        # directories keyed by temp paths that no longer existed, one more
+        # with every full run. An environment variable is the only patch a
+        # child inherits, so the two say the same thing here.
+        clean["RELAY_HOME"] = str(self.home / ".claude" / "relay")
         env = mock.patch.dict(os.environ, clean, clear=True)
         env.start()
         self.addCleanup(env.stop)
+        # And no test starts a real process. The tests that care about the
+        # spawn patch this again with their own double; the point of doing it
+        # here is that a test which merely calls the end hook on its way to
+        # something else cannot leak a recorder by accident.
+        spawn = mock.patch.object(relay_spawn, "start",
+                                  return_value=(4242, "reparented (test)"))
+        spawn.start()
+        self.addCleanup(spawn.stop)
         self.addCleanup(self._tmp.cleanup)
         # A project relay has already been running in. Without this every
         # fixture transcript would sit before the epoch the first call writes,

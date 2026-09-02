@@ -22,6 +22,7 @@ from relay_common import (
     TASKS_DONE_HEADING,
     TASK_OPEN_RE,
     THIN_MARK,
+    condensed_parts,
     diary_dir,
     force_utf8,
     inbox_dir,
@@ -45,10 +46,37 @@ from relay_detect import plan_entry
 # ===PITFALLS===; the two mean append and replace respectively.
 SECTION_RE = re.compile(
     r"===(PRUNE_PITFALLS|PRUNE_WORKFLOW|TASKS_DONE|DIARY|PITFALLS|WORKFLOW"
-    r"|CURRENT|DECIDED|MOVE|END)===")
+    r"|CURRENT|DECIDED|MOVE|READ|END)===")
 # The bullet marker and any date the model wrote anyway. Only a bracket that
 # starts with a date is eaten: "- [進行中] ..." is content, not a stamp.
 DATE_PREFIX_RE = re.compile(r"^-\s*(?:\[\s*\d{4}-\d{1,2}-\d{1,2}[^]]*\]\s*)?")
+
+
+SHORT_READ_MARK = ("- **relay 注意**: 読み物 {want} パートのうち {got} しか"
+                   "読まれていない。この記録は途中までの可能性がある")
+
+
+def short_read(cwd, sid, sections):
+    """The line to add when the reading was not opened, or None when it was.
+
+    The recorder declares a count and the count is checked against the parts
+    actually on disk, because the instruction to read everything is the one
+    thing that already failed: told to read a file it could not open, it
+    read a hundred lines of 3971 and wrote the entry anyway. A number it has
+    to state is a claim that can be wrong out loud.
+
+    Only multi-part readings are checked. A single file was never refused,
+    and a job written before parts existed has no count to give.
+    """
+    want = len(condensed_parts(cwd, sid))
+    if want <= 1:
+        return None
+    digits = re.search(r"\d+", sections.get("READ", ""))
+    got = int(digits.group()) if digits else None
+    if got is not None and got >= want:
+        return None
+    return SHORT_READ_MARK.format(
+        want=want, got=f"{got} パート" if got is not None else "申告なし")
 
 
 def parse_sections(text):
@@ -186,7 +214,7 @@ def main():
 
     stats = {"diary": 0, "pitfalls": 0, "workflow": 0, "current": "-",
              "decided": "-", "dropped": 0, "bad": 0, "stale": 0, "move": 0,
-             "tasks": 0, "thin": 0}
+             "tasks": 0, "thin": 0, "short": 0}
     did_merge = False
 
     files = sorted(inbox.glob("*.txt")) if inbox.is_dir() else []
@@ -228,6 +256,16 @@ def main():
                     stats["bad"] += 1
                     log("apply", f"cannot place entry for {name}; discarded")
                 else:
+                    # The entry is kept either way. A short reading makes a
+                    # thin entry, and a thin entry that says so is worth
+                    # more than a session recorded as nothing at all — the
+                    # alternative, refusing it, offers the same transcript
+                    # to the same model on every startup from then on.
+                    note = short_read(cwd, name, sections)
+                    if note:
+                        diary_body = diary_body.rstrip() + "\n" + note
+                        stats["short"] += 1
+                        log("apply", f"{name[:8]}: {note}")
                     num = upsert_entry(cwd, pending, diary_body)
                     stats["diary"] += 1
                     log("apply", f"diary S{num} ({pending.mode}) "
@@ -343,7 +381,7 @@ def main():
     except OSError as e:
         log("apply", f"could not refresh the merge job: {e!r}")
 
-    print("diary={diary} thin={thin} pitfalls=+{pitfalls} "
+    print("diary={diary} thin={thin} short={short} pitfalls=+{pitfalls} "
           "workflow=+{workflow} current={current} decided={decided} "
           "dropped={dropped} bad={bad} stale={stale} move={move} "
           "tasks=-{tasks} pitfalls_lines={pl} workflow_lines={wl} "
