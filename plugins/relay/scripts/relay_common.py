@@ -509,6 +509,13 @@ def _cut_bytes(text, budget):
     return out
 
 
+def _header_reserve(stem):
+    """Bytes to keep back for a part's header, whatever its number turns out
+    to be. 64 covers the fixed decoration (23), a five-digit count on both
+    sides of the slash, and the blank line after it, with room to spare."""
+    return len(stem.encode("utf-8")) + 64
+
+
 def _write_reading(dst, blocks):
     """Write the reading as `dst`, or as numbered parts beside it.
 
@@ -523,7 +530,13 @@ def _write_reading(dst, blocks):
         except OSError:
             pass
 
-    runs = _split_blocks(blocks)
+    # The header is part of the file Read has to open, so it comes out of
+    # the budget rather than sitting on top of it. Its exact length is not
+    # knowable here — "1/9" and "1/10" differ by a byte, and the count is
+    # what the split is about to decide — so the reserve is the session id
+    # plus room for the decoration, the digits and the blank line. Measured
+    # without it: a 1.29 MB session produced a part of 40,031 bytes.
+    runs = _split_blocks(blocks, READ_PART_BYTES - _header_reserve(stem))
     if len(runs) <= 1:
         write_atomic(dst, BLOCK_SEP.join(blocks) + "\n")
         return [dst]

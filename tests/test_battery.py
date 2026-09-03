@@ -843,11 +843,28 @@ class TestReadingParts(ApplyCase):
                          "割ったのに丸ごとの版が残っている")
 
     def test_no_part_can_be_refused_by_read(self):
-        """Each one stays under the ceiling that started all of this."""
+        """Each one stays under the ceiling that started all of this.
+
+        The size checked is the file on disk, header included. Allowing the
+        header on top of the budget let a real 1.29 MB session produce a
+        40,031-byte part while every test stayed green (2026-09-03).
+        """
         src, parts = self.build(turns=250)
         for p in parts:
             self.assertLessEqual(p.stat().st_size,
-                                 relay_common.READ_PART_BYTES + 200, p.name)
+                                 relay_common.READ_PART_BYTES, p.name)
+
+    def test_the_budget_is_the_size_of_the_file_not_of_its_body(self):
+        """The session id is 36 characters in production and 8 in a fixture,
+        and the header grows with it; the file may not."""
+        src, parts = self.build(turns=250)
+        long_stem = "a" * 64
+        dst = relay_common.condensed_dir(self.cwd) / f"{long_stem}.md"
+        blocks = [TestCondensing.reading(self, parts)[i:i + 3000]
+                  for i in range(0, 200000, 3000)]
+        for p in relay_common._write_reading(dst, blocks):
+            self.assertLessEqual(p.stat().st_size,
+                                 relay_common.READ_PART_BYTES, p.name)
 
     def test_the_parts_hold_everything_the_one_file_held(self):
         src, parts = self.build(turns=250)
