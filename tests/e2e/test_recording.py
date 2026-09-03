@@ -1361,5 +1361,34 @@ class TestTheReadingIsCheckedAgainstWhatWasOpened(PipelineCase):
         self.split_into(3)
         self.assertEqual(self.record("4")["short"], "0")
 
+
+class TestTheStartupLogNamesItsSession(PipelineCase):
+    """Feature: SessionStart のログ行は、どのセッションのものかを名乗る"""
+
+    def log_text(self):
+        return relay_common.read_text(relay_common.relay_home() / "log.txt")
+
+    def test_the_injection_line_carries_the_session_id(self):
+        self.write_knowledge("current.md", "いまここ")
+        self.start_hook()
+        self.assertIn("new: injected", self.log_text())
+
+    def test_the_backlog_line_carries_it_too(self):
+        self.make_transcript(SID, dt(2026, 8, 27, 19, 11),
+                             dt(2026, 8, 27, 22, 30), mtime=time.time() - 7200)
+        self.start_hook()
+        self.assertIn("new: 1 session(s) to record", self.log_text())
+
+    def test_a_hook_call_without_one_still_logs(self):
+        """The id is a courtesy to whoever reads the log, not a requirement."""
+        self.write_knowledge("current.md", "いまここ")
+        out = io.StringIO()
+        payload = {"cwd": self.cwd, "source": "startup"}
+        with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
+             contextlib.redirect_stdout(out):
+            session_start_hook.main()
+        self.assertIn("いまここ", out.getvalue())
+        self.assertIn("????????: injected", self.log_text())
+
 if __name__ == "__main__":
     unittest.main()

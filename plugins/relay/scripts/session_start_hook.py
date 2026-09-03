@@ -102,18 +102,24 @@ def main():
     if not in_scope(str(cwd)):
         return
 
+    # One log holds every project's startups, so a `[start]` line on its own
+    # says which project but not which session — and two sessions of the same
+    # project a minute apart are told apart only by lining timestamps up
+    # against transcripts. The id costs eight characters.
+    me = (data.get("session_id") or "????????")[:8]
+
     sections = build_sections(cwd)
     if sections:
         print(relay_prompts.PREAMBLE)
         print("\n\n".join(sections))
-        log("start", f"injected {len(sections)} sections for {cwd}")
+        log("start", f"{me}: injected {len(sections)} sections for {cwd}")
 
     # Detection must never break startup or swallow the injection above.
     try:
         running = running_sids(cwd)
         pending = [p for p in pending_sessions(cwd) if p.sid not in running]
     except Exception as e:
-        log("start", f"detect error: {e!r}")
+        log("start", f"{me}: detect error: {e!r}")
         return
 
     if running:
@@ -131,7 +137,7 @@ def main():
                                                 encoding="utf-8")
             except OSError as e:
                 log("start", f"could not leave a watch for {sid[:8]}: {e!r}")
-        log("start", f"{len(running)} recorder(s) still at work in {cwd}")
+        log("start", f"{me}: {len(running)} recorder(s) still at work in {cwd}")
 
     if not pending:
         return
@@ -141,7 +147,7 @@ def main():
     cmd = 'python "{}" --cwd "{}"'.format(
         (SCRIPTS / "relay_record.py").as_posix(), pathlib.Path(cwd).as_posix())
     print(relay_prompts.STARTUP_NOTICE.format(n=len(pending), cmd=cmd))
-    log("start", f"{len(pending)} session(s) to record for {cwd}")
+    log("start", f"{me}: {len(pending)} session(s) to record for {cwd}")
 
 
 if __name__ == "__main__":
