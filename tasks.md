@@ -38,21 +38,3 @@ relay は 2026-09-12 に `claude plugin uninstall relay@relay` でアンイン�
       こちらから見た）。`claude-memory/shiori/relay_port.py`・`record_prompt.py` は改行以外の差が0、
       `claude-memory/tests/test_relay_port.py` は差20行がすべて import パスの読み替え。生の sha256 は
       改行が LF→CRLF に化けるため不一致になる（手順は `export/README.md` の「中身」節）
-
-## アンインストールで実行できなくなった項目（要否を判断する）
-
-- [ ] **下の4件をこのまま消すか、どこかへ移すかを決める** — いずれも relay の hook が動くことを前提に
-      していて、アンインストール後は永久に着手できない。記録として残す価値があるものは
-      `docs/adr.md` へ移す
-  - **v0.9.1 の受け入れ確認** — 次に 1MB 級のセッションが記録されたときに (1) パートの実サイズが
-    全部 40,000B 以下 (2) `short=0` (3) `~/.claude/relay/log.txt` の `[start]` 行が `<sid8>: ` で
-    始まっていること、を見る予定だった。**記録係が動かないので、もう記録される回が来ない。**
-    受け入れ試験そのものは v0.9.0 で完走・4項目すべて緑（2026-09-03・freetalk 側。6e9d59f3 を
-    replace で記録／part01〜08 の8本すべてが Read され Bash 0回・offset 指定 0件／`short=0`／
-    `reading_tokens=119,884` で予算超過なし／78.7秒）
-  - **spec.html の再生成** — 案C（読み物のパート分割・`===READ===` の照合・`RELAY_HOME`）が
-    仕様書に入っていない。動かないプラグインの仕様書を作り直す意味があるかを決める
-  - **overwrite 係が旧 current.md をなぞる件（freetalk 5(a)）** — 完了済みの項目を未実施として
-    書き戻した。overwrite 係はもう走らない。同じ失敗の型は shiori 側にある
-  - **epoch のリポジトリ内サブディレクトリ由来のキー** — `C--claude-projects-relay-plugins-relay` /
-    `-plugins-relay-scripts` / `-tests` の3件。`~/.claude/relay/` ごと消す判断に含める
