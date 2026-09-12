@@ -3,6 +3,8 @@
 relay は 2026-09-12 に `claude plugin uninstall relay@relay` でアンインストールされた。
 **hook は新しく開くセッションから一切動かない。**このリポジトリは claude-memory への移植元として残す
 （`export/`）。本体のコードは変更しない。
+**`export/` は git 管理外（`.gitignore`・2026-09-13）。**この repo は public なので、11プロジェクトの
+tasks 本文を含む `export/migrate_tasks.*` は追跡しない。現物はローカルの `export/` にある。
 
 ## relay の撤退
 
@@ -38,3 +40,19 @@ relay は 2026-09-12 に `claude plugin uninstall relay@relay` でアンイン�
       こちらから見た）。`claude-memory/shiori/relay_port.py`・`record_prompt.py` は改行以外の差が0、
       `claude-memory/tests/test_relay_port.py` は差20行がすべて import パスの読み替え。生の sha256 は
       改行が LF→CRLF に化けるため不一致になる（手順は `export/README.md` の「中身」節）
+- [x] **着手不能4件を `docs/adr.md` へ移送・push（2026-09-13）** — v0.9.1 の受け入れ確認／spec.html の
+      再生成／overwrite 係／epoch のサブディレクトリ由来キーを ADR 1項目に畳み、この節から削除した。
+      あわせて未 push だった 9 コミットを push（`a29d2f9..e20dacd`・force なし）。この repo が public
+      だと分かったため、`export/` を **履歴ごと** 外してから送った（tip で消すだけでは `02df928` 等の
+      コミットから blob が読める）。9 コミットとも origin 未反映だったので force 不要。`export/` のみを
+      触る3コミットは空になり消滅し 6+1 コミットに。公開されたのは `.gitignore`・`docs/adr.md`・
+      `tasks.md`・`tests/e2e/test_recording.py` の 51 行のみ（`gh api .../contents/export` → 404、
+      `git/trees/e20dacd?recursive=1` の `^export/` → 0 件で確認）
+- [ ] **`tasks.md`・`docs/adr.md` に残る `export/...` 参照の扱いを決める** — public 側では実体の無い
+      パスを指す（`export/migrate_tasks.curated.json`・`export/migrate_tasks.final.txt`・
+      `export/README.md`）。ローカルの記録としては正しいので、書き換えると手元の追跡性が落ちる。
+      **保留の理由:** どちらを優先するかはユーザー判断。**再開条件:** public の README や ADR を
+      外部の人が読む用途が出てきたとき、または `export/` をローカルからも消すと決めたとき
+- [ ] **`backup/pre-export-strip-2026-09-13` ブランチの削除** — 履歴書き換え前の 9 コミット（旧 tip
+      `100c054`）をローカルに保持している。**再開条件:** `export/*.py` を公開し直す必要が無いと
+      確定し、かつ `export/` の現物がローカルに揃っていることを再確認できたとき。それまでは消さない
