@@ -32,10 +32,12 @@ relay は 2026-09-12 に `claude plugin uninstall relay@relay` でアンイン�
 - [ ] **context-lint の `extraPaths` から `knowledge/*.md` を外す** — `~/.claude/settings.json` の
       `pluginConfigs."context-lint@context-lint".options.extraPaths` に `knowledge/*.md` が残っている
       （2026-09-12 実測）。`knowledge/` を消す工程と同時に外す。**設定変更はユーザーの承認が要る**
-- [ ] **`export/` の修正（2026-09-11）の取り込み確認** — 実データ由来の偽陽性を2件直した
+- [x] **`export/` の修正（2026-09-11）の取り込み確認** — 実データ由来の偽陽性を2件直した
       （`mistake_items` の切れ目を箇条書きからラベル「した事」基準へ・`SECTION_RE` に廃止済みの
-      `PITFALLS`/`WORKFLOW` を追加）。claude-memory へ `relay_port.py` と `test_relay_port.py` の
-      再コピーを依頼済み。**待ち: claude-memory の再コピー完了報告**
+      `PITFALLS`/`WORKFLOW` を追加）。**2026-09-13 に現物で照合して完了を確認**（報告待ちではなく
+      こちらから見た）。`claude-memory/shiori/relay_port.py`・`record_prompt.py` は改行以外の差が0、
+      `claude-memory/tests/test_relay_port.py` は差20行がすべて import パスの読み替え。生の sha256 は
+      改行が LF→CRLF に化けるため不一致になる（手順は `export/README.md` の「中身」節）
 
 ## アンインストールで実行できなくなった項目（要否を判断する）
 

@@ -202,14 +202,21 @@ class TestOneEntryPerTranscript(PipelineCase):
         self.assertNotIn(OTHER[:8], still_pending)
 
     def _long_gap(self):
-        """An entry from 20 days ago, and the same transcript woken up today.
+        """An entry from 20 days ago, and the same transcript woken up.
 
         Dates are relative because the fixture has to stay in the past: a
         transcript whose last timestamp is in the future never counts as
         ended, and the test would silently assert nothing.
+
+        The wake-up is anchored to **yesterday at noon**, not to `local_now()
+        - 2h`. The entry goes into the file for the session's own date
+        (2026-08-30 の項), which is the date of `woke - 40分` — so an anchor
+        that floats with the wall clock puts the two on opposite sides of
+        midnight, and the date this test reads comes back empty. Measured:
+        red from 02:00 to 02:39 local, green the other 23h20m.
         """
-        woke = relay_common.local_now().replace(
-            second=0, microsecond=0) - datetime.timedelta(hours=2)
+        woke = (relay_common.local_now() - datetime.timedelta(days=1)).replace(
+            hour=12, minute=0, second=0, microsecond=0)
         old_day = (woke - datetime.timedelta(days=20)).replace(hour=19, minute=11)
         self.old_end = old_day.replace(hour=22, minute=30)
         self.write_diary(f"{old_day:%Y-%m-%d}",
